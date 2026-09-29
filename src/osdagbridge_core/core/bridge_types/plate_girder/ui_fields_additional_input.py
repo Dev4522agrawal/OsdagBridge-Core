@@ -2411,7 +2411,6 @@ CROSS_BRACING_DETAILS_SCHEMA = {
                     "label":   "Type of Connection:",
                     "type":    TYPE_COMBOBOX,
                     "choices": ["Bolted", "Welded"],
-                    "enabled_choices": ["Bolted"],
                 }]},
 
                 # ── Bracing section ──────────────────────────────────────────
@@ -2611,7 +2610,6 @@ END_DIAPHRAGM_DETAILS_SCHEMA = {
                         "label": "Type of Connection:",
                         "type": TYPE_COMBOBOX,
                         "choices": ["Bolted", "Welded"],
-                        "enabled_choices": ["Bolted"],
                     }],
                 },
                 {
