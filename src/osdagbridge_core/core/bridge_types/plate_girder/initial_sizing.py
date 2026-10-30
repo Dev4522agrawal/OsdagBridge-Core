@@ -772,7 +772,6 @@ def member_section_from_dims(
     unit: str = "mm",
 ) -> dict:
     """Derived member properties for one welded I-girder.
-
     Dimensions are given in ``unit`` ("mm" or "m"). Returns SECTION_DERIVED_KEYS:
     web depth in ``unit``; everything else in SI. All equations stay in
     steel_i_section_properties(); this only handles units.
@@ -787,27 +786,16 @@ def member_section_from_dims(
     return out
 
 
-def sync_member_section(d: dict, suffix: str = "", unit: str = "mm",
-                        precision: Optional[int] = None) -> bool:
-    """Refresh every derived member property in ``d`` from its own dimensions.
-
-    Reads the six dimension keys ``<base_key><suffix>`` (e.g. ".G2.M1", or ""
-    for the un-suffixed representative keys) and overwrites the derived keys
-    with the same suffix. Does nothing and returns False when a dimension is
-    missing, non-numeric (e.g. "All" or an optimisation-bounds list) or not
-    positive, so it never invents values. ``precision`` (significant figures)
-    is only for values stored for UI display; leave it None for design use.
-    """
-    try:
-        dims = {a: float(d[f"{key}{suffix}"]) for a, key in SECTION_DIM_KEYS.items()}
-    except (KeyError, TypeError, ValueError):
-        return False
-    if any(v <= 0.0 for v in dims.values()):
-        return False
-    if dims["D"] - dims["tf_top"] - dims["tf_bot"] <= 0.0:
-        return False
+def sync_member_section(d: dict, suffix: str = "", unit: str = "mm", precision: Optional[int] = None,) -> bool:
+    """Refresh every derived member property from its six dimensions."""
+    dims = {
+        a: float(d[f"{key}{suffix}"])
+        for a, key in SECTION_DIM_KEYS.items()
+    }
     for key, val in member_section_from_dims(unit=unit, **dims).items():
-        d[f"{key}{suffix}"] = float(f"{val:.{precision}g}") if precision else val
+        d[f"{key}{suffix}"] = (
+            float(f"{val:.{precision}g}") if precision is not None else val
+        )
     return True
 
 

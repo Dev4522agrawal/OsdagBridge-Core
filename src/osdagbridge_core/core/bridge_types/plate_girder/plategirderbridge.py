@@ -246,6 +246,7 @@ from osdagbridge_core.core.utils.common import (
     KEY_MP_STIFFENER_INTERMEDIATE_OUTSTAND,
     KEY_MP_STIFFENER_INTERMEDIATE_SPACING,
     KEY_MP_STIFFENER_LONGITUDINAL,
+    KEY_MP_GD_SEGMENT_TABLE,
     )
 
 from osdagbridge_core.core.bridge_types.plate_girder.initial_sizing import (

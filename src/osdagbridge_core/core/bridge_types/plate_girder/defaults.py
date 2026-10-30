@@ -680,74 +680,53 @@ def _on_no_of_girders_changed(working_input_dict: dict) -> None:
         KEY_MP_GIRDER_WEB_THICKNESS,
     )
     _snapped_mm = {
-        KEY_MP_GIRDER_TOP_FLANGE_THICKNESS:    ceil_to_sail(section_props['t_f_top'] * 1e3),
+        KEY_MP_GIRDER_TOP_FLANGE_THICKNESS: ceil_to_sail(section_props['t_f_top'] * 1e3),
         KEY_MP_GIRDER_BOTTOM_FLANGE_THICKNESS: ceil_to_sail(section_props['t_f_bot'] * 1e3),
-        KEY_MP_GIRDER_WEB_THICKNESS:           ceil_to_sail(section_props['t_w'] * 1e3),
+        KEY_MP_GIRDER_WEB_THICKNESS: ceil_to_sail(section_props['t_w'] * 1e3),
     }
     _dims_mm = {
-        KEY_MP_GIRDER_DEPTH:                round(section_props['D'] * 1e3),
-        KEY_MP_GIRDER_TOP_FLANGE_WIDTH:     round(section_props['B_top'] * 1e3),
-        KEY_MP_GIRDER_BOTTOM_FLANGE_WIDTH:  round(section_props['B_bot'] * 1e3),
+        KEY_MP_GIRDER_DEPTH: round(section_props['D'] * 1e3),
+        KEY_MP_GIRDER_TOP_FLANGE_WIDTH: round(section_props['B_top'] * 1e3),
+        KEY_MP_GIRDER_BOTTOM_FLANGE_WIDTH: round(section_props['B_bot'] * 1e3),
     }
-    # What a pristine member shows: Optimized keeps "All" for thicknesses
-    # (resolved by the designer), Custom shows the SAIL-snapped value.
-    MP_GIRDER_SEEDS = {KEY_MP_GIRDER_SYMMETRY: section_props['symmetry'], **_dims_mm}
-    for k in _thickness_keys:
-        MP_GIRDER_SEEDS[k] = "All" if design_mode == 'Optimized' else _snapped_mm[k]
-    # Numeric stand-in used only to derive properties while a dimension is not
-    # a single number (Optimized "All" / bounds list): the initial-sizing value.
-    _numeric_seed = {**_dims_mm, **{k: float(_snapped_mm[k]) for k in _thickness_keys}}
+    MP_GIRDER_SEEDS = {
+        KEY_MP_GIRDER_SYMMETRY: section_props['symmetry'],
+        **_dims_mm,
+    }
+    for key in _thickness_keys:
+        MP_GIRDER_SEEDS[key] = (
+            "All" if design_mode == 'Optimized' else _snapped_mm[key]
+        )
 
-    def _same(a, b) -> bool:
-        try:
-            return float(a) == float(b)
-        except (TypeError, ValueError):
-            return str(a).strip() == str(b).strip()
+    # Numeric dimensions used for section-property calculations.
+    # Optimized mode displays "All" but calculations require numeric values.
+    eff = {
+        **_dims_mm,
+        **{key: float(_snapped_mm[key]) for key in _thickness_keys},
+    }
 
     for girder_idx in range(1, count + 1):
         for member_id in [1]:
             sfx = f".G{girder_idx}.M{member_id}"
-            seeded_key = f"member_properties.girder_details.seeded_dims{sfx}"
-            last_seed = working_input_dict.get(seeded_key) or {}
 
-            for base_key, seed in MP_GIRDER_SEEDS.items():
-                key = base_key + sfx
-                cur = working_input_dict.get(key)
-                pristine = (
-                    cur is None or str(cur).strip() == ""
-                    or (base_key in last_seed and _same(cur, last_seed[base_key]))
-                )
-                # Optimized sizes thicknesses itself: only a bounds list is user data.
-                if design_mode == 'Optimized' and base_key in _thickness_keys and not isinstance(cur, list):
-                    pristine = True
-                if pristine:
-                    working_input_dict[key] = seed
-            working_input_dict[seeded_key] = dict(MP_GIRDER_SEEDS)
+            # Populate member dimensions.
+            for base_key, value in MP_GIRDER_SEEDS.items():
+                working_input_dict[base_key + sfx] = value
 
-            # Rolled members keep their catalogue properties (see Additional Inputs)
-            if str(working_input_dict.get(f"{KEY_MP_GIRDER_TYPE}{sfx}", "")).strip().lower() == "rolled":
+            # Preserve catalogue properties for rolled sections.
+            if str(working_input_dict[f"{KEY_MP_GIRDER_TYPE}{sfx}"]).strip().lower() == "rolled":
                 continue
 
-            eff = {}
-            for base_key in (KEY_MP_GIRDER_DEPTH, KEY_MP_GIRDER_TOP_FLANGE_WIDTH,
-                             KEY_MP_GIRDER_BOTTOM_FLANGE_WIDTH, *_thickness_keys):
-                val = working_input_dict.get(base_key + sfx)
-                try:
-                    float(val)
-                    eff[base_key] = val
-                except (TypeError, ValueError):
-                    eff[base_key] = _numeric_seed[base_key]
-            if sync_member_section(eff, "", unit="mm", precision=8):
-                for k in SECTION_DERIVED_KEYS:
-                    working_input_dict[k + sfx] = eff[k]
+            # Calculate and populate all derived section properties.
+            sync_member_section(eff, unit="mm", precision=8)
 
-    # Sync base (non-dynamic) keys with girder 1 — edge beams fall back to these
-    # when their per-girder key doesn't exist (e.g. G5.M1 for 4-girder bridge).
-    for base_key in (*MP_GIRDER_SEEDS, *SECTION_DERIVED_KEYS):
-        g1_key = f"{base_key}.G1.M1"
-        if g1_key in working_input_dict:
-            working_input_dict[base_key] = working_input_dict[g1_key]
+            for key in SECTION_DERIVED_KEYS:
+                working_input_dict[key + sfx] = eff[key]
 
+    # Populate representative base keys from the first member
+        if girder_idx == 1 and member_id == 1:
+            for base_key in (*MP_GIRDER_SEEDS, *SECTION_DERIVED_KEYS):
+                working_input_dict[base_key] = working_input_dict[base_key + sfx]
     # ── Stiffener ─────────────────────────────────────────────────────────────
 
     # --- Remove all stale dynamic stiffener keys (handles girder count change) ---
