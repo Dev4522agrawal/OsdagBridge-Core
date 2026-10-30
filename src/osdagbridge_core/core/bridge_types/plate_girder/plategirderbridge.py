@@ -20,7 +20,7 @@ from .dto import (
 from .defaults import (
     BASIC_INPUT_DICT,
 )
-from .initial_sizing import DEFAULT_FOOTPATH_WIDTH
+from .initial_sizing import DEFAULT_FOOTPATH_WIDTH, sync_member_section
 from .analyser import BridgeGrillageModel
 from osdagbridge_core.core.utils.memory_guard import OpsMemoryGuard, log_memory, tracemalloc_mark_start
 from .analysis_results import PlateGirderAnalysisResults
@@ -625,6 +625,19 @@ class PlateGirderBridge:
             _to_m(base_key)
             for gi in range(count):
                 _to_m(f"{base_key}.G{gi + 1}.M1")
+
+        # Recompute web depth and all derived section properties from the final
+        # metre dimensions (single source: initial_sizing.sync_member_section ->
+        # steel_i_section_properties). Every key a consumer can resolve is
+        # refreshed from ITS OWN dimensions: each member segment, and the
+        # un-suffixed representative keys that resolve_girder_value() returns
+        # first for edge beams / output cards (they were previously left with
+        # the initial-sizing values).
+        for gi in range(count):
+            for seg in inp[f"{KEY_MP_GD_SEGMENT_TABLE}.G{gi + 1}"]:
+                mi = int(re.fullmatch(r"G\d+M(\d+)", str(seg["id"]).strip()).group(1))
+                sync_member_section(inp, f".G{gi + 1}.M{mi}", unit="m")
+        sync_member_section(inp, "", unit="m")
 
     def _run_stage(self, stage_num: str, func, *args, **kwargs):
         # Check for user cancel before entering each stage, then emit start/complete markers

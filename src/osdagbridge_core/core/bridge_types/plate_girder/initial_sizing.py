@@ -721,6 +721,96 @@ def steel_i_section_properties(
     }
 
 
+# ---------------------------------------------------------------------------
+# Member-property sync: ONE place that turns the six welded-girder dimensions
+# into every dependent Member Properties value.
+# ---------------------------------------------------------------------------
+from osdagbridge_core.core.utils.common import (  # noqa: E402
+    KEY_MP_GIRDER_DEPTH,
+    KEY_MP_GIRDER_TOP_FLANGE_WIDTH,
+    KEY_MP_GIRDER_TOP_FLANGE_THICKNESS,
+    KEY_MP_GIRDER_BOTTOM_FLANGE_WIDTH,
+    KEY_MP_GIRDER_BOTTOM_FLANGE_THICKNESS,
+    KEY_MP_GIRDER_WEB_THICKNESS,
+)
+
+# steel_i_section_properties() argument -> input_dict base key
+SECTION_DIM_KEYS = {
+    "D": KEY_MP_GIRDER_DEPTH,
+    "bf_top": KEY_MP_GIRDER_TOP_FLANGE_WIDTH,
+    "tf_top": KEY_MP_GIRDER_TOP_FLANGE_THICKNESS,
+    "bf_bot": KEY_MP_GIRDER_BOTTOM_FLANGE_WIDTH,
+    "tf_bot": KEY_MP_GIRDER_BOTTOM_FLANGE_THICKNESS,
+    "tw": KEY_MP_GIRDER_WEB_THICKNESS,
+}
+
+# Derived keys (web depth + the twelve section properties) that are always a
+# pure function of SECTION_DIM_KEYS. Web depth is in the caller's length unit,
+# the rest are SI (m2, m4, m3, m6, m, kg/m).
+SECTION_DERIVED_KEYS = (
+    KEY_MP_GIRDER_WEB_DEPTH,
+    KEY_MP_GIRDER_SECTIONAL_AREA,
+    KEY_MP_GIRDER_MASS,
+    KEY_MP_GIRDER_SECTIONAL_IZ,
+    KEY_MP_GIRDER_SECTIONAL_IY,
+    KEY_MP_GIRDER_RADIUS_GYRATION_Z,
+    KEY_MP_GIRDER_RADIUS_GYRATION_Y,
+    KEY_MP_GIRDER_ELASTIC_MODULUS_ZZ,
+    KEY_MP_GIRDER_ELASTIC_MODULUS_ZY,
+    KEY_MP_GIRDER_PLASTIC_MODULUS_ZUZ,
+    KEY_MP_GIRDER_PLASTIC_MODULUS_ZUY,
+    KEY_MP_GIRDER_TORSION_CONSTANT_IT,
+    KEY_MP_GIRDER_WARPING_CONSTANT_IW,
+)
+
+_UNIT_TO_M = {"mm": 1e-3, "m": 1.0}
+
+
+def member_section_from_dims(
+    D: float, bf_top: float, tf_top: float,
+    bf_bot: float, tf_bot: float, tw: float,
+    unit: str = "mm",
+) -> dict:
+    """Derived member properties for one welded I-girder.
+
+    Dimensions are given in ``unit`` ("mm" or "m"). Returns SECTION_DERIVED_KEYS:
+    web depth in ``unit``; everything else in SI. All equations stay in
+    steel_i_section_properties(); this only handles units.
+    """
+    k = _UNIT_TO_M[unit]
+    p = steel_i_section_properties(
+        D=D * k, bf_top=bf_top * k, tf_top=tf_top * k,
+        bf_bot=bf_bot * k, tf_bot=tf_bot * k, tw=tw * k,
+    )
+    out = {key: p[key] for key in SECTION_DERIVED_KEYS}
+    out[KEY_MP_GIRDER_WEB_DEPTH] = p[KEY_MP_GIRDER_WEB_DEPTH] / k
+    return out
+
+
+def sync_member_section(d: dict, suffix: str = "", unit: str = "mm",
+                        precision: Optional[int] = None) -> bool:
+    """Refresh every derived member property in ``d`` from its own dimensions.
+
+    Reads the six dimension keys ``<base_key><suffix>`` (e.g. ".G2.M1", or ""
+    for the un-suffixed representative keys) and overwrites the derived keys
+    with the same suffix. Does nothing and returns False when a dimension is
+    missing, non-numeric (e.g. "All" or an optimisation-bounds list) or not
+    positive, so it never invents values. ``precision`` (significant figures)
+    is only for values stored for UI display; leave it None for design use.
+    """
+    try:
+        dims = {a: float(d[f"{key}{suffix}"]) for a, key in SECTION_DIM_KEYS.items()}
+    except (KeyError, TypeError, ValueError):
+        return False
+    if any(v <= 0.0 for v in dims.values()):
+        return False
+    if dims["D"] - dims["tf_top"] - dims["tf_bot"] <= 0.0:
+        return False
+    for key, val in member_section_from_dims(unit=unit, **dims).items():
+        d[f"{key}{suffix}"] = float(f"{val:.{precision}g}") if precision else val
+    return True
+
+
 def composite_section_properties(
     beff_mm: float,
     ds_mm: float,
