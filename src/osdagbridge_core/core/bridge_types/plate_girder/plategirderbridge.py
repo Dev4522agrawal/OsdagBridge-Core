@@ -849,12 +849,6 @@ class PlateGirderBridge:
             # Stage 8: 3D CAD & Drawing Generation
             self._run_stage("8", self._stage_cad_generation)
 
-            print("\n===== GIRDER AREAS =====")
-            for key, value in self.output_dict.items():
-                    if "section_properties.area" in key.lower():
-                        print(f"{key} : {value}")
-            print("========================")
-
             # Combined girder + deck verdict — last thing before completion
             is_safe = bridge_logger.final_verdict(self.output_dict)
 
@@ -2481,20 +2475,6 @@ class PlateGirderBridge:
         # store_design_results also sets the KEY_UTIL_* values so the block
         # below is redundant — but kept for the _frontend.set_output_value calls.
         self.store_design_results(design_results)
-
-        print("\n========== STIFFENER DEBUG ==========")
-
-        print("\n--- INPUT DICT: Detailed stiffener values ---")
-        for key, value in self.input_dict.items():
-            if "stiffener_details" in key.lower():
-                print(key, "=", value)
-
-        print("\n--- OUTPUT DICT: Flattened stiffener values ---")
-        for key, value in self.output_dict.items():
-            if "stiff" in key.lower():
-                print(key, "=", value)
-
-        print("========== END STIFFENER DEBUG ==========\n")
 
         # Log the girder verdict (reads it from output_dict)
         bridge_logger.girder_verdict(self.output_dict)
