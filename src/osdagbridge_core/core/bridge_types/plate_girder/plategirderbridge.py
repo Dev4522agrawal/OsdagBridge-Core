@@ -849,6 +849,12 @@ class PlateGirderBridge:
             # Stage 8: 3D CAD & Drawing Generation
             self._run_stage("8", self._stage_cad_generation)
 
+            print("\n===== GIRDER AREAS =====")
+            for key, value in self.output_dict.items():
+                    if "section_properties.area" in key.lower():
+                        print(f"{key} : {value}")
+            print("========================")
+
             # Combined girder + deck verdict — last thing before completion
             is_safe = bridge_logger.final_verdict(self.output_dict)
 
@@ -2476,6 +2482,20 @@ class PlateGirderBridge:
         # below is redundant — but kept for the _frontend.set_output_value calls.
         self.store_design_results(design_results)
 
+        print("\n========== STIFFENER DEBUG ==========")
+
+        print("\n--- INPUT DICT: Detailed stiffener values ---")
+        for key, value in self.input_dict.items():
+            if "stiffener_details" in key.lower():
+                print(key, "=", value)
+
+        print("\n--- OUTPUT DICT: Flattened stiffener values ---")
+        for key, value in self.output_dict.items():
+            if "stiff" in key.lower():
+                print(key, "=", value)
+
+        print("========== END STIFFENER DEBUG ==========\n")
+
         # Log the girder verdict (reads it from output_dict)
         bridge_logger.girder_verdict(self.output_dict)
 
@@ -3582,6 +3602,10 @@ class PlateGirderBridge:
             out[KEY_SD_TORSIONAL_RESTRAINT + suf] = _gv_or_empty(inp, KEY_MP_GIRDER_TORSIONAL_RESTRAINT, gi)
             out[KEY_SD_WARPING_RESTRAINT + suf]   = _gv_or_empty(inp, KEY_MP_GIRDER_WARPING_RESTRAINT, gi)
             out[KEY_SD_WEB_TYPE + suf]            = _gv_or_empty(inp, KEY_MP_GIRDER_WEB_TYPE, gi)
+            out[KEY_SD_SECTION_PROP_AREA + suf]   = round(sec["A_steel_mm2"]  / 1e2, 2)   # mm²  → cm²
+            out[KEY_SD_SECTION_PROP_IZ + suf]     = round(sec["Iz_steel_mm4"] / 1e4, 2)   # mm⁴  → cm⁴
+            out[KEY_SD_SECTION_PROP_ZZ + suf]     = round(sec["Ze_steel_mm3"] / 1e3, 2)   # mm³  → cm³
+            out[KEY_SD_SECTION_PROP_ZUZ + suf]    = round(sec["Zp_steel_mm3"] / 1e3, 2)   # mm³  → cm³
 
         # ── 3. Shear connector card ─────────────────────────────────────────────
         # All stud dimensions in mm; strengths in MPa; count and spacing as numbers.
@@ -3683,7 +3707,7 @@ class PlateGirderBridge:
         # Longitudinal: only the user can specify them; optimizer adds none.
         _stiff_data  = inp.get("stiffener_by_member") or {}
         _first_stiff = next(iter(_stiff_data.values()), {}) if _stiff_data else {}
-        _long_val    = str((_first_stiff or {}).get("longitudinal_stiffener", "No")).strip()
+        _long_val    = str(inp.get(f"{KEY_MP_STIFFENER_LONGITUDINAL}.G1.M1", "No")).strip()
         out[KEY_SD_STIFF_LONG]         = ((_long_val if _long_val and _long_val not in ("None", "NA", "") else "No")
                                           if _is_custom_stiff else "None")
 
@@ -3720,34 +3744,26 @@ class PlateGirderBridge:
 
         grade = str(inp.get(KEY_GIRDER, ""))
 
-        # Read stiffener state from the nested structure saved by StiffenerDetailsTab.collect_data()
-        stiffener_data = inp.get("stiffener_by_member") or {}
-        # Use the first member's state as the representative (bearing stiffeners are per bridge end)
-        first_member_state = {}
-        if stiffener_data:
-            first_key = next(iter(stiffener_data), None)
-            if first_key:
-                first_member_state = stiffener_data[first_key] or {}
-
-        def _stiff_from_member(key, fallback="NA"):
-            v = first_member_state.get(key)
+        # Read the representative (G1) stiffener values from the per-girder flat keys
+        def _stiff_from_member(base_key, fallback="NA"):
+            v = inp.get(f"{base_key}.G1.M1")
             if v is not None and str(v).strip() not in ("", "None", "NA"):
                 return str(v)
             return fallback
 
         # ── Bearing ─────────────────────────────────────────────────────────────────
         out["stiff_bearing_grade"]     = grade
-        out["stiff_bearing_thickness"] = _stiff_from_member("bearing_thickness_value")
-        out["stiff_bearing_width"]     = _stiff_from_member("bearing_outstand_mm")
-        out["stiff_bearing_spacing"]   = _stiff_from_member("bearing_spacing_mm")
+        out["stiff_bearing_thickness"] = _stiff_from_member(KEY_MP_STIFFENER_BEARING_THICKNESS)
+        out["stiff_bearing_width"]     = _stiff_from_member(KEY_MP_STIFFENER_BEARING_OUTSTAND)
+        out["stiff_bearing_spacing"]   = _stiff_from_member(KEY_MP_STIFFENER_SPACING)
 
         # ── Intermediate ────────────────────────────────────────────────────────────
-        int_stiff_on = _stiff_from_member("intermediate_stiffener", "No") == "Yes"
+        int_stiff_on = _stiff_from_member(KEY_MP_STIFFENER_INTERMEDIATE, "No") == "Yes"
         if int_stiff_on:
             out["stiff_intermediate_grade"]     = grade
-            out["stiff_intermediate_thickness"] = _stiff_from_member("intermediate_thickness_value")
-            out["stiff_intermediate_width"]     = _stiff_from_member("intermediate_outstand_mm")
-            out["stiff_intermediate_spacing"]   = _stiff_from_member("intermediate_spacing_mm")
+            out["stiff_intermediate_thickness"] = _stiff_from_member(KEY_MP_STIFFENER_INTERMEDIATE_THICKNESS)
+            out["stiff_intermediate_width"]     = _stiff_from_member(KEY_MP_STIFFENER_INTERMEDIATE_OUTSTAND)
+            out["stiff_intermediate_spacing"]   = _stiff_from_member(KEY_MP_STIFFENER_INTERMEDIATE_SPACING)
         else:
             out["stiff_intermediate_grade"]     = "NA"
             out["stiff_intermediate_thickness"] = "NA"
@@ -3755,11 +3771,11 @@ class PlateGirderBridge:
             out["stiff_intermediate_spacing"]   = "NA"
 
         # ── Longitudinal ─────────────────────────────────────────────────────────────
-        long_val = _stiff_from_member("longitudinal_stiffener", "No")
+        long_val = _stiff_from_member(KEY_MP_STIFFENER_LONGITUDINAL, "No")
         long_stiff_on = (long_val != "No")
         if long_stiff_on:
             out["stiff_longitudinal_grade"]     = grade
-            out["stiff_longitudinal_thickness"] = _stiff_from_member("longitudinal_thickness_value")
+            out["stiff_longitudinal_thickness"] = _stiff_from_member(KEY_MP_STIFFENER_LONGITUDINAL_THICKNESS)
             out["stiff_longitudinal_width"]     = "NA"
             out["stiff_longitudinal_spacing"]   = "NA"
         else:
