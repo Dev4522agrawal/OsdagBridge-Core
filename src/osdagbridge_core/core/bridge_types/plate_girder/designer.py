@@ -811,7 +811,7 @@ class CapacityResults:
     details: Dict[str, dict] = field(default_factory=dict)
 
     # ── Intermediate stiffener (IRC 24-2010 Cl.509.7.2 / IS 800 Cl.8.7.2) ──────────
-    is_H_limit_mm: float = 0.0          # Cl.509.7.2.4 — limiting outstanding leg (14tqε / 20tqε)
+    is_H_limit_mm: float = 0.0          # Cl.509.7.1.2 — limiting outstand (20·tq·ε)
     is_Iys_min_mm4: float = 0.0         # Cl.509.7.2.4 — minimum required MI
     is_Iys_prov_mm4: float = 0.0        # Cl.509.7.2.4 — provided MI
     is_Fqd_kN: float = 0.0             # Cl.509.7.2.5 — stiffener design buckling resistance
@@ -1630,6 +1630,14 @@ class IRC22CapacityCalculator:
     # TODO: Move these functions to IS800_2007 when ready.
     # ==============================================================================
 
+    @staticmethod
+    def _flat_stiffener_Iys(tq: float, H: float, tw: float, n_sides: int) -> float:
+        """MI of one set of flat stiffener plates: about the face of the web when
+        one-sided, about the web centreline when two-sided."""
+        if n_sides == 1:
+            return tq * H**3 / 3.0
+        return 2.0 * (tq * H**3 / 12.0 + tq * H * (tw / 2.0 + H / 2.0)**2)
+
     def compute_intermediate_stiffener(self) -> dict:
         """Intermediate transverse stiffener checks per IRC 24-2010 Cl.509.7.2 / IS 800 Cl.8.7.2.
 
@@ -1647,18 +1655,20 @@ class IRC22CapacityCalculator:
         # Physical outstand limit — stiffener must fit between web and flange edge (both sides)
         H_max = (min(sec.bf_top, sec.bf_bot) - tw) / 2.0
 
-        # Minimum tq to satisfy the outstanding-leg limit at H_max
-        tq_req_1sided = H_max / (14.0 * eps) if eps > 0 else 0.0
-        tq_req_2sided = H_max / (20.0 * eps) if eps > 0 else 0.0
+        # Cl.509.7.1.2 — minimum tq for which H_max satisfies the outstand limit 20·tq·ε
+        tq_req = H_max / (20.0 * eps) if eps > 0 else 0.0
 
         cfg = self.cfg.stiffener
+        n_sides = cfg.n_sides if cfg else 2
         full_check = cfg and cfg.c_mm > 0 and cfg.tq_mm > 0 and cfg.H_mm > 0
 
         if not full_check:
             # Design guidance: compute required spacing for the minimum viable plate
-            # Assume one-sided (conservative), tq = tq_req_1sided, H = H_max
-            tq_des  = tq_req_1sided
-            Iys_des = tq_des * H_max**3 / 3.0   # flat-plate one-sided, about face of web
+            # (tq = tq_req, H = H_max). H_max exceeds 14·tq·ε at this tq, so the
+            # stiffness comes from the core section (Cl.509.7.1.2).
+            tq_des     = tq_req
+            H_core_des = min(H_max, 14.0 * tq_des * eps)
+            Iys_des    = self._flat_stiffener_Iys(tq_des, H_core_des, tw, n_sides)
             # Minimum c such that Iys_min(c) ≤ Iys_des (from 1.5·d³·tw³/c² ≤ Iys_des)
             c_req = (math.sqrt(1.5 * d**3 * tw**3 / Iys_des)
                      if Iys_des > 0 else 0.0)
@@ -1670,8 +1680,7 @@ class IRC22CapacityCalculator:
             return {
                 "design_guidance"    : True,
                 "H_max_mm"           : round(H_max, 1),
-                "tq_req_1sided_mm"   : round(tq_req_1sided, 2),
-                "tq_req_2sided_mm"   : round(tq_req_2sided, 2),
+                "tq_req_mm"          : round(tq_req, 2),
                 "c_req_min_mm"       : round(c_req, 1),
                 "Iys_at_Hmax_mm4"    : round(Iys_des, 1),
             }
@@ -1680,12 +1689,13 @@ class IRC22CapacityCalculator:
         c       = cfg.c_mm
         tq      = cfg.tq_mm
         H       = cfg.H_mm
-        n_sides = cfg.n_sides
 
-        # Cl.509.7.2.4 — outstanding leg limit
-        H_limit = (14.0 if n_sides == 1 else 20.0) * tq * eps
-        # Minimum tq needed for the provided H to satisfy the leg limit
-        tq_req_provided = H / ((14.0 if n_sides == 1 else 20.0) * eps)
+        # Cl.509.7.1.2 — outstand from the face of the web ≤ 20·tq·ε
+        H_limit = 20.0 * tq * eps
+        # Minimum tq needed for the provided H to satisfy the outstand limit
+        tq_req_provided = H / (20.0 * eps)
+        # Outstand between 14·tq·ε and 20·tq·ε → design on a core section of 14·tq·ε
+        H_core = min(H, 14.0 * tq * eps)
 
         # Cl.509.7.2.4 — minimum MI
         if (c / d) < math.sqrt(2.0):
@@ -1695,18 +1705,16 @@ class IRC22CapacityCalculator:
             Iys_min     = 0.75 * d * tw**3
             iys_formula = "0.75·d·tw³"
 
-        # Provided MI — auto-compute from flat-plate formula when not explicitly given
+        # Provided MI — auto-compute from flat-plate formula (core section) when not given
         if cfg.Iys_mm4 > 0:
             Iys_prov = cfg.Iys_mm4
-        elif n_sides == 1:
-            Iys_prov = tq * H**3 / 3.0
         else:
-            Iys_prov = 2.0 * (tq * H**3 / 12.0 + tq * H * (tw / 2.0 + H / 2.0)**2)
+            Iys_prov = self._flat_stiffener_Iys(tq, H_core, tw, n_sides)
 
-        # Cl.509.7.2.5 — buckling check
+        # Cl.509.7.2.5 — buckling check (core section)
         h_w_strip = min(20.0 * tw, c / 2.0)
-        Aeff      = n_sides * H * tq + n_sides * h_w_strip * tw
-        Astiff    = n_sides * H * tq
+        Aeff      = n_sides * H_core * tq + n_sides * h_w_strip * tw
+        Astiff    = n_sides * H_core * tq
 
         rys  = math.sqrt(Iys_prov / Aeff) if Aeff > 0 else 0.0
         KL   = 0.7 * d
@@ -1720,11 +1728,11 @@ class IRC22CapacityCalculator:
         return {
             "design_guidance"    : False,
             "H_max_mm"           : round(H_max, 1),
-            "tq_req_1sided_mm"   : round(tq_req_1sided, 2),
-            "tq_req_2sided_mm"   : round(tq_req_2sided, 2),
+            "tq_req_mm"          : round(tq_req, 2),
             "H_mm"               : H,
             "H_limit_mm"         : round(H_limit, 3),
-            "H_limit_type"       : f"{'14' if n_sides == 1 else '20'}·tq·ε",
+            "H_limit_type"       : "20·tq·ε",
+            "H_core_mm"          : round(H_core, 3),
             "tq_req_provided_mm" : round(tq_req_provided, 2),
             "Iys_prov_mm4"       : round(Iys_prov, 3),
             "Iys_min_mm4"        : round(Iys_min, 3),
@@ -1778,8 +1786,8 @@ class IRC22CapacityCalculator:
             fcd_y = fy / gm0
             tq_req_bearing = (R * 1000.0 / (fcd_y * n_total * H_max)
                               if H_max > 0 and fcd_y > 0 else 0.0)
-            # Minimum tq for outstanding leg at H_max (one-sided limit, conservative)
-            tq_req_leg = H_max / (14.0 * eps) if eps > 0 else 0.0
+            # Cl.509.7.1.2 — minimum tq for outstand H_max ≤ 20·tq·ε
+            tq_req_leg = H_max / (20.0 * eps) if eps > 0 else 0.0
             tq_req = max(tq_req_bearing, tq_req_leg)
             return {
                 "design_guidance"   : True,
@@ -1803,15 +1811,19 @@ class IRC22CapacityCalculator:
         else:
             b1 = IS800_2007.cl_8_7_1_3_stiff_bearing_length(R, tw, sec.tf_top, 0.0, fy)
 
-        # Bearing stiffener MI — auto-compute (flat plates about CL of web) if not given.
-        # Every plate sits at the same distance from that axis, so the group MI is
+        # Cl.509.7.1.2 — outstand ≤ 20·tq·ε; between 14·tq·ε and 20·tq·ε the
+        # stiffener is designed on a core section with an outstand of 14·tq·ε.
+        H_limit_bs = 20.0 * tq * eps
+        tq_req_leg = H / (20.0 * eps) if eps > 0 else 0.0
+        H_core_bs  = min(H, 14.0 * tq * eps)
+
+        # Bearing stiffener MI — auto-compute (flat plates, core section) if not given.
+        # Every plate sits at the same distance from the axis, so the group MI is
         # n_plates × the MI of one set of plates across the web.
         if cfg.bs_Iys_mm4 > 0:
             Iys = cfg.bs_Iys_mm4
-        elif n_sides == 1:
-            Iys = n_plates * tq * H**3 / 3.0
         else:
-            Iys = n_plates * 2.0 * (tq * H**3 / 12.0 + tq * H * (tw / 2.0 + H / 2.0)**2)
+            Iys = n_plates * self._flat_stiffener_Iys(tq, H_core_bs, tw, n_sides)
 
         KL = 0.7 * d
 
@@ -1838,16 +1850,12 @@ class IRC22CapacityCalculator:
 
         # Cl.509.7.1.5 / 509.7.2.5 — Stiffener column buckling check
         h_w_strip = 20.0 * tw
-        Aeff_bs   = n_total * H * tq + 2 * h_w_strip * tw
+        Aeff_bs   = n_total * H_core_bs * tq + 2 * h_w_strip * tw
         rys_bs    = math.sqrt(Iys / Aeff_bs) if Aeff_bs > 0 else 0.0
         KL_r_bs   = KL / rys_bs if rys_bs > 0 else 1e9
 
         fcd_bs = IS800_2007.cl_7_1_2_1_design_compressisive_stress_plategirder(fy, gm0, KL_r_bs, E)
         Fcd_kN = fcd_bs * Aeff_bs / 1000.0
-
-        # Outstanding leg limit for the provided plate
-        H_limit_bs = 14.0 * tq * eps        # one-sided (conservative); bearing stiffeners are two-sided
-        tq_req_leg = H / (14.0 * eps) if eps > 0 else 0.0
 
         return {
             "design_guidance"   : False,
@@ -1875,7 +1883,9 @@ class IRC22CapacityCalculator:
             "rys_bs_mm"         : round(rys_bs, 3),
             "KL_r_bs"           : round(KL_r_bs, 3),
             "fcd_bs_MPa"        : round(fcd_bs, 3),
+            "H_mm"              : H,
             "H_limit_bs_mm"     : round(H_limit_bs, 3),
+            "H_core_bs_mm"      : round(H_core_bs, 3),
             "Fcd_kN"            : round(Fcd_kN, 3),
             "R_kN"              : R,
         }
@@ -2508,29 +2518,31 @@ class DCREngine:
                 raise KeyError("'design_guidance' key missing from intermediate_stiffener details.")
             if is_det["design_guidance"]:
                 # No dimensions provided — report required values as a single guidance row
-                for key in ("H_max_mm", "tq_req_1sided_mm", "tq_req_2sided_mm", "c_req_min_mm"):
+                for key in ("H_max_mm", "tq_req_mm", "c_req_min_mm"):
                     if key not in is_det:
                         raise KeyError(f"'{key}' missing from intermediate_stiffener details.")
                 _note = (f"H_max={(is_det['H_max_mm']):.0f} mm = (bf_min−tw)/2; "
-                         f"tq_req(1-sided)≥{is_det['tq_req_1sided_mm']:.1f} mm, "
-                         f"tq_req(2-sided)≥{is_det['tq_req_2sided_mm']:.1f} mm")
+                         f"tq_req≥{is_det['tq_req_mm']:.1f} mm (20·tq·ε)")
                 if is_det["c_req_min_mm"] > 0:
                     _note += f"; c_req≥{is_det['c_req_min_mm']:.0f} mm (from Iys check)"
-                self._add_check(20, "Int.Stiff: Sizing Required", "Cl.509.7.2.4",
+                self._add_check(20, "Int.Stiff: Sizing Required", "Cl.509.7.1.2 / 509.7.2.4",
                                  0.0, 1.0, "–", note=_note)
             else:
                 # Full verification — three separate checks
-                for key in ("H_mm", "H_limit_mm", "H_limit_type", "H_max_mm", "tq_req_provided_mm",
-                           "Iys_min_mm4", "Iys_prov_mm4", "iys_formula", "Fq_kN", "Fqd_kN",
-                           "fcd_MPa", "KL_r"):
+                for key in ("H_mm", "H_limit_mm", "H_limit_type", "H_core_mm", "H_max_mm",
+                           "tq_req_provided_mm", "Iys_min_mm4", "Iys_prov_mm4", "iys_formula",
+                           "Fq_kN", "Fqd_kN", "fcd_MPa", "KL_r"):
                     if key not in is_det:
                         raise KeyError(f"'{key}' missing from intermediate_stiffener details.")
-                # Cl.509.7.2.4 — outstanding leg: H ≤ H_limit
-                self._add_check(20, "Int.Stiff: Leg ≤ H_limit", "Cl.509.7.2.4",
+                # Cl.509.7.1.2 — outstand: H ≤ H_limit
+                _leg_note = (f"{is_det['H_limit_type']}; "
+                             f"H_max={is_det['H_max_mm']:.0f} mm; "
+                             f"tq_req≥{is_det['tq_req_provided_mm']:.1f} mm")
+                if is_det["H_core_mm"] < is_det["H_mm"]:
+                    _leg_note += f"; designed on core outstand 14·tq·ε={is_det['H_core_mm']:.0f} mm"
+                self._add_check(20, "Int.Stiff: Leg ≤ H_limit", "Cl.509.7.1.2",
                                  is_det["H_mm"], is_det["H_limit_mm"], "mm",
-                                 note=(f"{is_det['H_limit_type']}; "
-                                       f"H_max={is_det['H_max_mm']:.0f} mm; "
-                                       f"tq_req≥{is_det['tq_req_provided_mm']:.1f} mm"))
+                                 note=_leg_note)
                 # Cl.509.7.2.4 — MI: Iys_prov ≥ Iys_min
                 self._add_check(20, "Int.Stiff: Iys ≥ Iys_min", "Cl.509.7.2.4",
                                  is_det["Iys_min_mm4"], is_det["Iys_prov_mm4"], "mm⁴",
@@ -2563,12 +2575,22 @@ class DCREngine:
                                        f"(n_plates={bs_det['n_plates']}/face × "
                                        f"{bs_det['n_sides']} faces)"))
             else:
-                # Full verification — four separate checks
+                # Full verification — five separate checks
                 for key in ("Fcdw_wb_kN", "fcc_wb_MPa", "A_wb_mm2", "Fcdw_lc_kN", "fcd_y_MPa",
                            "A_lc_mm2", "Fpsd_kN", "Aq_mm2", "tq_req_bearing_mm", "Fcd_kN",
-                           "fcd_bs_MPa", "KL_r_bs"):
+                           "fcd_bs_MPa", "KL_r_bs", "H_mm", "H_limit_bs_mm", "H_core_bs_mm",
+                           "H_max_mm", "tq_req_leg_mm"):
                     if key not in bs_det:
                         raise KeyError(f"'{key}' missing from bearing_stiffener details.")
+                # Cl.509.7.1.2 — outstand: H ≤ 20·tq·ε
+                _bs_leg_note = (f"20·tq·ε; H_max={bs_det['H_max_mm']:.0f} mm; "
+                                f"tq_req≥{bs_det['tq_req_leg_mm']:.1f} mm")
+                if bs_det["H_core_bs_mm"] < bs_det["H_mm"]:
+                    _bs_leg_note += (f"; designed on core outstand "
+                                     f"14·tq·ε={bs_det['H_core_bs_mm']:.0f} mm")
+                self._add_check(21, "Brg.Stiff: Leg ≤ H_limit", "Cl.509.7.1.2",
+                                 bs_det["H_mm"], bs_det["H_limit_bs_mm"], "mm",
+                                 note=_bs_leg_note)
                 # Cl.509.7.3.1 — web buckling (PASS = stiffener not needed; FAIL = stiffener needed)
                 self._add_check(21, "Brg.Stiff: Web Buckling", "Cl.509.7.3.1",
                                  R, bs_det["Fcdw_wb_kN"], "kN",
@@ -3845,7 +3867,7 @@ def run_design_check(
         "bs_n_plates"               : config.stiffener.bs_n_plates if config.stiffener else 0,
         # -- stiffener design summary (Table 5.7): method + computed (optimized) values --
         "stiff_method"              : capacity.shear_method,
-        "stiff_int_thick_req"       : capacity.details.get("intermediate_stiffener", {}).get("tq_req_1sided_mm"),
+        "stiff_int_thick_req"       : capacity.details.get("intermediate_stiffener", {}).get("tq_req_mm"),
         "stiff_int_space_req"       : capacity.details.get("intermediate_stiffener", {}).get("c_req_min_mm"),
         "stiff_end_thick_req"       : capacity.details.get("bearing_stiffener", {}).get("tq_req_bearing_mm"),
         # -- stiffener capacities --
