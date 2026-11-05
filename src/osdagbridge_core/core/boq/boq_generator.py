@@ -170,10 +170,8 @@ def calculate_stiffener_quantities(inputs: dict, outputs: dict, span: float, n_g
     int_qty = 0
     int_vol = 0.0
     int_dims = None
-    bearing_stiffeners_each_end = _num(outputs.get(KEY_SD_STIFF_END_COUNT))
-    bearing_qty_per_girder = None
-    if bearing_stiffeners_each_end is not None:
-        bearing_qty_per_girder = int(bearing_stiffeners_each_end) * 2
+    # Fallback when a girder has no per-girder bearing count of its own.
+    default_bearing_per_side = _num(outputs.get(KEY_SD_STIFF_END_COUNT))
 
     for gi in range(n_girders):
         web_depth = _girder_num(inputs, "member_properties.girder_details.section_input.web_depth", gi)
@@ -187,14 +185,16 @@ def calculate_stiffener_quantities(inputs: dict, outputs: dict, span: float, n_g
         if web_depth <= 0:
             continue
 
-        # The same input drives plates-per-end for bearing stiffeners and the
-        # one-sided/two-sided count for intermediate ones (see StiffenerConfig).
-        n_plates = _girder_num(inputs, KEY_MP_STIFFENER_NO_BEARING_STIFFENERS, gi)
+        # The user's bearing stiffener count is per face of the web at each support;
+        # bearing stiffeners are two-sided and provided at both ends of the girder.
+        bearing_per_side = _girder_num(inputs, KEY_MP_STIFFENER_NO_BEARING_STIFFENERS, gi)
+        if bearing_per_side is None:
+            bearing_per_side = default_bearing_per_side
         bearing_t = _girder_num(inputs, KEY_MP_STIFFENER_BEARING_THICKNESS, gi)
         bearing_w = _girder_num(inputs, KEY_MP_STIFFENER_BEARING_OUTSTAND, gi)
 
-        if bearing_qty_per_girder and bearing_t and bearing_w:
-            qty = bearing_qty_per_girder
+        if bearing_per_side and bearing_t and bearing_w:
+            qty = int(bearing_per_side) * 2 * 2   # × 2 sides × 2 ends
             bearing_qty += qty
             bearing_vol += qty * web_depth * bearing_t * bearing_w / 1e9
             if bearing_dims is None:
@@ -207,7 +207,8 @@ def calculate_stiffener_quantities(inputs: dict, outputs: dict, span: float, n_g
             int_w = _girder_num(inputs, KEY_MP_STIFFENER_INTERMEDIATE_OUTSTAND, gi)
             if spacing and int_t and int_w and spacing > 0:
                 n_locations = max(0, int((span * 1000.0) / spacing) - 1)
-                qty = n_locations * int(n_plates or 1)
+                # Intermediate stiffeners are two-sided (StiffenerConfig.n_sides).
+                qty = n_locations * 2
                 int_qty += qty
                 int_vol += qty * web_depth * int_t * int_w / 1e9
                 if int_dims is None:

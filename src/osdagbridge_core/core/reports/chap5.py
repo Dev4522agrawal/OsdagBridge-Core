@@ -358,8 +358,8 @@ def ch5_design_checks(checks_data, bridge, chart_paths=None) -> str:
         ["Shear Buckling Design Method", str(_render_value(bridge.output_dict, KEY_SD_STIFF_METHOD)).replace("_", " ").title()],
         ["Intermediate Stiffener Thickness (mm)", _render_value(bridge.output_dict, KEY_SD_STIFF_INT_THICK)],
         ["Intermediate Stiffener Spacing (mm)", _render_value(bridge.output_dict, KEY_SD_STIFF_INT_SPACING)],
-        ["End Panel Stiffener Thickness (mm)", _render_value(bridge.output_dict, KEY_SD_STIFF_END_THICK)],
-        ["No. of End Panel Stiffeners", _render_value(bridge.output_dict, KEY_SD_STIFF_END_COUNT)],
+        ["Bearing Stiffener Thickness (mm)", _render_value(bridge.output_dict, KEY_SD_STIFF_END_THICK)],
+        ["No. of Bearing Stiffeners (per face of web)", _render_value(bridge.output_dict, KEY_SD_STIFF_END_COUNT)],
         ["Longitudinal Stiffeners", _render_value(bridge.output_dict, KEY_SD_STIFF_LONG)],
     ]
     t57_groups = [(lbl, t57_items) for lbl, _ in girder_entries]

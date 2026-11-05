@@ -319,7 +319,7 @@ class StiffenerConfig:
     c_mm: float = 0.0           # panel spacing between adjacent stiffeners (mm)
     tq_mm: float = 0.0          # stiffener plate thickness (mm)
     H_mm: float = 0.0           # outstanding leg height (mm)
-    n_sides: int = 1             # 1 = one-sided, 2 = two-sided
+    n_sides: int = 2             # 1 = one-sided, 2 = two-sided
     Iys_mm4: float = 0.0        # provided MI (mm⁴); 0 = auto-compute from flat-plate formula
     V_kN: float = 0.0           # design shear at stiffener location (kN)
     Vcr_kN: float = 0.0         # critical shear resistance at that location (kN)
@@ -333,7 +333,8 @@ class StiffenerConfig:
     # ── Bearing stiffener (Cl.509.7.3 / IS 800 Cl.8.7.3) ──────────────────────────────
     bs_tq_mm: float = 0.0       # stiffener plate thickness (mm)
     bs_H_mm: float = 0.0        # outstanding leg height (mm)
-    bs_n_plates: int = 2        # number of stiffener plates bearing on flange
+    bs_n_plates: int = 2        # bearing stiffener plates per face of web, at each support
+    bs_n_sides: int = 2         # 1 = one-sided, 2 = two-sided (plates on both faces of web)
     bs_R_kN: float = 0.0        # design reaction / concentrated load (kN)
     bs_b1_mm: float = 0.0       # stiff bearing length on flange (0 = auto via IS 800 Cl.8.7.1.3)
     bs_Iys_mm4: float = 0.0     # provided MI (mm⁴) for bearing stiffener; 0 = auto-compute
@@ -647,11 +648,15 @@ class BridgeConfig:
             c_mm        = _optfloat(KEY_MP_STIFFENER_INTERMEDIATE_SPACING),
             tq_mm       = _optfloat(KEY_MP_STIFFENER_INTERMEDIATE_THICKNESS),
             H_mm        = _optfloat(KEY_MP_STIFFENER_INTERMEDIATE_OUTSTAND),
-            n_sides     = int(_optfloat(KEY_MP_STIFFENER_NO_BEARING_STIFFENERS, 1)),
+            # No sidedness input yet — intermediate stiffeners are taken as two-sided.
+            # TODO: wire to a sidedness key once added to the Stiffener Details tab.
+            n_sides     = 2,
             shear_method= shear_method,
             bs_tq_mm    = _optfloat(KEY_MP_STIFFENER_BEARING_THICKNESS),
             bs_H_mm     = _optfloat(KEY_MP_STIFFENER_BEARING_OUTSTAND),
             bs_n_plates = int(_optfloat(KEY_MP_STIFFENER_NO_BEARING_STIFFENERS, 2)),
+            # User count is per face of web; bearing stiffeners are taken as two-sided.
+            bs_n_sides  = 2,
             bs_R_kN     = 0.0,
         )
 
@@ -1756,7 +1761,9 @@ class IRC22CapacityCalculator:
         eps  = math.sqrt(250.0 / fy)
 
         R        = cfg.bs_R_kN
-        n_plates = cfg.bs_n_plates
+        n_plates = cfg.bs_n_plates                  # per face of web
+        n_sides  = cfg.bs_n_sides
+        n_total  = n_plates * n_sides               # all plates at the support
 
         # Physical outstand limit (same formula as intermediate stiffener)
         H_max = (min(sec.bf_top, sec.bf_bot) - tw) / 2.0
@@ -1769,7 +1776,7 @@ class IRC22CapacityCalculator:
         if not full_check:
             # Design guidance: minimum tq from bearing contact check at H_max
             fcd_y = fy / gm0
-            tq_req_bearing = (R * 1000.0 / (fcd_y * n_plates * H_max)
+            tq_req_bearing = (R * 1000.0 / (fcd_y * n_total * H_max)
                               if H_max > 0 and fcd_y > 0 else 0.0)
             # Minimum tq for outstanding leg at H_max (one-sided limit, conservative)
             tq_req_leg = H_max / (14.0 * eps) if eps > 0 else 0.0
@@ -1781,6 +1788,8 @@ class IRC22CapacityCalculator:
                 "tq_req_leg_mm"     : round(tq_req_leg, 2),
                 "tq_req_mm"         : round(tq_req, 2),
                 "n_plates"          : n_plates,
+                "n_sides"           : n_sides,
+                "n_plates_total"    : n_total,
                 "R_kN"              : R,
             }
 
@@ -1794,11 +1803,15 @@ class IRC22CapacityCalculator:
         else:
             b1 = IS800_2007.cl_8_7_1_3_stiff_bearing_length(R, tw, sec.tf_top, 0.0, fy)
 
-        # Bearing stiffener MI — auto-compute (two-sided flat plates about CL of web) if not given
+        # Bearing stiffener MI — auto-compute (flat plates about CL of web) if not given.
+        # Every plate sits at the same distance from that axis, so the group MI is
+        # n_plates × the MI of one set of plates across the web.
         if cfg.bs_Iys_mm4 > 0:
             Iys = cfg.bs_Iys_mm4
+        elif n_sides == 1:
+            Iys = n_plates * tq * H**3 / 3.0
         else:
-            Iys = 2.0 * (tq * H**3 / 12.0 + tq * H * (tw / 2.0 + H / 2.0)**2)
+            Iys = n_plates * 2.0 * (tq * H**3 / 12.0 + tq * H * (tw / 2.0 + H / 2.0)**2)
 
         KL = 0.7 * d
 
@@ -1818,14 +1831,14 @@ class IRC22CapacityCalculator:
         Fcdw_lc_kN = fcd_y * A_lc / 1000.0
 
         # Cl.509.7.3.3 / IS 800 8.7.3.3 — Bearing contact check
-        Aq      = n_plates * H * tq
+        Aq      = n_total * H * tq
         Fpsd_kN = fcd_y * Aq / 1000.0
         # Minimum tq required for the bearing check to pass
-        tq_req_bearing = (R * 1000.0 / (fcd_y * n_plates * H) if H > 0 and fcd_y > 0 else 0.0)
+        tq_req_bearing = (R * 1000.0 / (fcd_y * n_total * H) if H > 0 and fcd_y > 0 else 0.0)
 
         # Cl.509.7.1.5 / 509.7.2.5 — Stiffener column buckling check
         h_w_strip = 20.0 * tw
-        Aeff_bs   = 2 * H * tq + 2 * h_w_strip * tw
+        Aeff_bs   = n_total * H * tq + 2 * h_w_strip * tw
         rys_bs    = math.sqrt(Iys / Aeff_bs) if Aeff_bs > 0 else 0.0
         KL_r_bs   = KL / rys_bs if rys_bs > 0 else 1e9
 
@@ -1853,6 +1866,8 @@ class IRC22CapacityCalculator:
             "fcd_y_MPa"         : round(fcd_y, 3),
             "Fcdw_lc_kN"        : round(Fcdw_lc_kN, 3),
             "n_plates"          : n_plates,
+            "n_sides"           : n_sides,
+            "n_plates_total"    : n_total,
             "Aq_mm2"            : round(Aq, 3),
             "Fpsd_kN"           : round(Fpsd_kN, 3),
             "h_w_strip_mm"      : round(h_w_strip, 3),
@@ -2545,7 +2560,8 @@ class DCREngine:
                                  note=(f"R={R:.1f} kN; H_max={bs_det['H_max_mm']:.0f} mm; "
                                        f"tq_req(bearing)≥{bs_det['tq_req_bearing_mm']:.1f} mm, "
                                        f"tq_req(leg)≥{bs_det['tq_req_leg_mm']:.1f} mm "
-                                       f"(n_plates={bs_det['n_plates']})"))
+                                       f"(n_plates={bs_det['n_plates']}/face × "
+                                       f"{bs_det['n_sides']} faces)"))
             else:
                 # Full verification — four separate checks
                 for key in ("Fcdw_wb_kN", "fcc_wb_MPa", "A_wb_mm2", "Fcdw_lc_kN", "fcd_y_MPa",

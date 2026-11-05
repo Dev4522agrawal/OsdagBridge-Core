@@ -2205,9 +2205,11 @@ STIFFENER_DETAILS_SCHEMA = {
             "text":     (
                 "Bearing Stiffeners:\n"
                 "Provided at support locations to transfer reaction forces into the web. "
-                "Number and spacing are configurable per member end.\n\n"
+                "Placed on both faces of the web; the number entered is per face, "
+                "at each support. Spacing is configurable per member end.\n\n"
                 "Intermediate Stiffeners:\n"
                 "Used to improve shear resistance of slender webs. "
+                "Placed on both faces of the web (one plate per face at each location). "
                 "Enable and specify spacing when required.\n\n"
                 "Longitudinal Stiffeners:\n"
                 "Reduce web slenderness for heavily loaded girders. "
@@ -2228,7 +2230,7 @@ STIFFENER_DETAILS_SCHEMA = {
                 {
                     "fields": [{
                         "id":      KEY_MP_STIFFENER_NO_BEARING_STIFFENERS,
-                        "label":   "No. of Bearing Stiffeners<br>(on one side only):",
+                        "label":   "No. of Bearing Stiffeners<br>(per face of web):",
                         "type":    TYPE_COMBOBOX,
                         "choices": VALUES_BEARING_STIFFENER_COUNT,
                         "on_change": "_on_bearing_stiffener_count_changed",
