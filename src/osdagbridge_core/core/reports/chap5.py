@@ -398,8 +398,8 @@ def ch5_design_checks(checks_data, bridge, chart_paths=None) -> str:
     else:
         t58_block = ""
 
-    # Generate Table 5.9 rows — bearing stiffener checks (IS 800 Cl.8.7.3).
-    # End panel == bearing stiffener for this bridge. Each resistance vs reaction R.
+    # Generate Table 5.9 rows — bearing stiffener checks (IRC 24 Cl.509.7.3–509.7.5).
+    # Each resistance vs reaction R.
     # Resistances are 0 in guidance-only mode (optimized w/o outstand) → N/A until
     # the designer defaults outstand to (bf−tw)/2.
     _bs_r = bridge.output_dict.get(KEY_SD_BS_R)
@@ -412,15 +412,23 @@ def ch5_design_checks(checks_data, bridge, chart_paths=None) -> str:
         prov_s = f"{prov} kN"
         status = "PASS" if float(prov) >= float(_bs_r) else r"\textcolor{red}{FAIL}"
         return (req_s, prov_s, status)
-    _wb_req, _wb_prov, _wb_st = _bs_check(KEY_SD_BS_FCDW_WB)
-    _lc_req, _lc_prov, _lc_st = _bs_check(KEY_SD_BS_FCDW_LC)
+    def _bs_need(resist_key):
+        # Unstiffened-web checks (Cl.509.7.3.1, 509.7.4) decide whether a stiffener is
+        # needed; they are not pass/fail checks on the stiffener provided.
+        req_s, prov_s, status = _bs_check(resist_key)
+        if status != "N/A":
+            status = ("Stiffener required" if float(_bs_r) > float(bridge.output_dict.get(resist_key))
+                      else "Not required")
+        return (req_s, prov_s, status)
+    _wb_req, _wb_prov, _wb_st = _bs_need(KEY_SD_BS_FCDW_WB)
+    _lc_req, _lc_prov, _lc_st = _bs_need(KEY_SD_BS_FCDW_LC)
     _ps_req, _ps_prov, _ps_st = _bs_check(KEY_SD_BS_FPSD)
     _cb_req, _cb_prov, _cb_st = _bs_check(KEY_SD_BS_FCD)
     t59_items = [
-        ["Web Buckling Resistance", _wb_req, _wb_prov, _wb_st],
-        ["Local Crushing Resistance", _lc_req, _lc_prov, _lc_st],
-        ["Bearing Capacity", _ps_req, _ps_prov, _ps_st],
-        ["Column Buckling Resistance", _cb_req, _cb_prov, _cb_st],
+        ["Unstiffened Web Buckling (Cl. 509.7.3.1)", _wb_req, _wb_prov, _wb_st],
+        ["Unstiffened Web Local Capacity (Cl. 509.7.4)", _lc_req, _lc_prov, _lc_st],
+        ["Stiffener Bearing Check (Cl. 509.7.5.2)", _ps_req, _ps_prov, _ps_st],
+        ["Stiffener Buckling Check (Cl. 509.7.5.1)", _cb_req, _cb_prov, _cb_st],
     ]
     t59_groups = [(lbl, t59_items) for lbl, _ in girder_entries]
 
@@ -1357,10 +1365,10 @@ This section presents all structural design checks performed by OsdagBridge. For
 \vspace{1em}
 
 """ + render_grouped_report_table(
-    "End Panel Stiffener Checks", t59_groups,
+    "Bearing Stiffener Checks", t59_groups,
     headers=["girder", "check", "required", "provided", "status"],
     align=["C", "L", "C", "C", "C"], escape=False) + r"""
-\noindent\textit{Note: IS 800 Cl. 8.4.2.2}
+\noindent\textit{Note: IRC 24 Cl. 509.7.3 -- 509.7.5}
 
 \vspace{1em}
 """ + render_grouped_report_table(

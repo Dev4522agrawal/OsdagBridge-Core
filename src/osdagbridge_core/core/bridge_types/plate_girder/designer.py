@@ -818,10 +818,10 @@ class CapacityResults:
     is_Fq_kN: float = 0.0              # Cl.509.7.2.5 — demand = max(V − Vcr_pc, 0)
 
     # ── Bearing stiffener (IRC 24-2010 Cl.509.7.3 / IS 800 Cl.8.7.3) ───────────────
-    bs_Fcdw_wb_kN: float = 0.0          # Cl.509.7.3.1 — web bearing zone buckling resistance
-    bs_Fcdw_lc_kN: float = 0.0          # Cl.509.7.3.2 — local crushing resistance
-    bs_Fpsd_kN: float = 0.0             # Cl.509.7.3.3 — bearing contact resistance
-    bs_Fcd_kN: float = 0.0             # Cl.509.7.2.5 — stiffener column buckling resistance
+    bs_Fcdw_wb_kN: float = 0.0          # Cl.509.7.3.1 — buckling strength of the unstiffened web
+    bs_Fcdw_lc_kN: float = 0.0          # Cl.509.7.4 — local capacity of the web at the flange
+    bs_Fpsd_kN: float = 0.0             # Cl.509.7.5.2 — bearing strength of the stiffener
+    bs_Fcd_kN: float = 0.0             # Cl.509.7.5.1 — buckling resistance of the stiffener (Fxd)
     bs_R_kN: float = 0.0               # reaction demand
 
 
@@ -1782,10 +1782,10 @@ class IRC22CapacityCalculator:
         full_check = cfg.bs_tq_mm > 0
 
         if not full_check:
-            # Design guidance: minimum tq from bearing contact check at H_max
-            fcd_y = fy / gm0
-            tq_req_bearing = (R * 1000.0 / (fcd_y * n_total * H_max)
-                              if H_max > 0 and fcd_y > 0 else 0.0)
+            # Design guidance: minimum tq from the bearing check (Cl.509.7.5.2) at H_max
+            f_bear = fy / (0.8 * gm0)
+            tq_req_bearing = (R * 1000.0 / (f_bear * n_total * H_max)
+                              if H_max > 0 and f_bear > 0 else 0.0)
             # Cl.509.7.1.2 — minimum tq for outstand H_max ≤ 20·tq·ε
             tq_req_leg = H_max / (20.0 * eps) if eps > 0 else 0.0
             tq_req = max(tq_req_bearing, tq_req_leg)
@@ -1825,30 +1825,36 @@ class IRC22CapacityCalculator:
         else:
             Iys = n_plates * self._flat_stiffener_Iys(tq, H_core_bs, tw, n_sides)
 
+        # Cl.509.7.1.5 — effective length of a load carrying stiffener: 0.7·L, taking the
+        # loaded flange as restrained against rotation in the plane of the stiffener (case a).
         KL = 0.7 * d
 
-        # Cl.509.7.3.1 / IS 800 8.7.3.1 — Web buckling check
-        # Checks if the unstiffened web bearing zone can carry R (Euler stress, no imperfection reduction).
+        # Cl.509.7.3.1 — web check: buckling strength Fcdw of the unstiffened web. Decides
+        # whether a load carrying stiffener is needed (R > Fcdw); not a check on the stiffener.
+        # Area (b1 + n1)·tw, buckling about the axis parallel to the web (r = tw/√12), curve c.
         n1      = d / 2.0
         A_wb    = (b1 + n1) * tw
-        rys_wb  = math.sqrt(Iys / A_wb) if A_wb > 0 else 0.0
-        KL_r_wb = KL / rys_wb if rys_wb > 0 else 1e9
-        fcc_wb  = (math.pi**2 * E) / KL_r_wb**2
-        Fcdw_wb_kN = fcc_wb * A_wb / 1000.0
+        rys_wb  = tw / math.sqrt(12.0)
+        KL_r_wb = KL / rys_wb
+        fcd_wb  = IS800_2007.cl_7_1_2_1_design_compressisive_stress_plategirder(fy, gm0, KL_r_wb, E)
+        Fcdw_wb_kN = fcd_wb * A_wb / 1000.0
 
-        # Cl.509.7.3.2 / IS 800 8.7.3.2 — Local crushing check
+        # Cl.509.7.4 — local capacity of the web at the flange, Fw = (b1 + n2)·tw·fyw/γm0.
+        # Decides whether a bearing stiffener is needed (R > Fw); not a check on the stiffener.
+        # n2: dispersion through the flange to the web junction at 1:2.5.
         n2         = 2.5 * sec.tf_top
         A_lc       = (b1 + n2) * tw
         fcd_y      = fy / gm0
         Fcdw_lc_kN = fcd_y * A_lc / 1000.0
 
-        # Cl.509.7.3.3 / IS 800 8.7.3.3 — Bearing contact check
+        # Cl.509.7.5.2 — bearing check: Fpsd = Aq·fyq / (0.8·γm0) ≥ Fx
+        f_bear  = fy / (0.8 * gm0)
         Aq      = n_total * H * tq
-        Fpsd_kN = fcd_y * Aq / 1000.0
+        Fpsd_kN = f_bear * Aq / 1000.0
         # Minimum tq required for the bearing check to pass
-        tq_req_bearing = (R * 1000.0 / (fcd_y * n_total * H) if H > 0 and fcd_y > 0 else 0.0)
+        tq_req_bearing = (R * 1000.0 / (f_bear * n_total * H) if H > 0 and f_bear > 0 else 0.0)
 
-        # Cl.509.7.1.5 / 509.7.2.5 — Stiffener column buckling check
+        # Cl.509.7.5.1 / 509.7.1.5 — buckling check of the stiffener: Fx ≤ Fxd
         h_w_strip = 20.0 * tw
         Aeff_bs   = n_total * H_core_bs * tq + 2 * h_w_strip * tw
         rys_bs    = math.sqrt(Iys / Aeff_bs) if Aeff_bs > 0 else 0.0
@@ -1867,7 +1873,8 @@ class IRC22CapacityCalculator:
             "A_wb_mm2"          : round(A_wb, 3),
             "rys_wb_mm"         : round(rys_wb, 3),
             "KL_mm"             : round(KL, 3),
-            "fcc_wb_MPa"        : round(fcc_wb, 3),
+            "KL_r_wb"           : round(KL_r_wb, 3),
+            "fcd_wb_MPa"        : round(fcd_wb, 3),
             "Fcdw_wb_kN"        : round(Fcdw_wb_kN, 3),
             "n2_mm"             : round(n2, 3),
             "A_lc_mm2"          : round(A_lc, 3),
@@ -1877,6 +1884,7 @@ class IRC22CapacityCalculator:
             "n_sides"           : n_sides,
             "n_plates_total"    : n_total,
             "Aq_mm2"            : round(Aq, 3),
+            "f_bear_MPa"        : round(f_bear, 3),
             "Fpsd_kN"           : round(Fpsd_kN, 3),
             "h_w_strip_mm"      : round(h_w_strip, 3),
             "Aeff_bs_mm2"       : round(Aeff_bs, 3),
@@ -2225,8 +2233,14 @@ class DCREngine:
             return "WARN"
         return "FAIL"
 
-    def _add_check(self, check_id, name, clause, demand, capacity, unit, note, governing_method=""):
-        if capacity > 0:
+    def _add_check(self, check_id, name, clause, demand, capacity, unit, note, governing_method="",
+                   info=False):
+        if info:
+            # Informative row (e.g. whether a stiffener is needed): not a utilisation,
+            # so it carries no DCR and can never govern or fail the design.
+            dcr = 0.0
+            status = "INFO"
+        elif capacity > 0:
             dcr = demand / capacity
             status = self.classify(dcr)
         else:
@@ -2567,7 +2581,7 @@ class DCREngine:
                 for key in ("H_max_mm", "tq_req_bearing_mm", "tq_req_leg_mm", "n_plates"):
                     if key not in bs_det:
                         raise KeyError(f"'{key}' missing from bearing_stiffener details.")
-                self._add_check(21, "Brg.Stiff: Sizing Required", "Cl.509.7.3.3",
+                self._add_check(21, "Brg.Stiff: Sizing Required", "Cl.509.7.5.2 / 509.7.1.2",
                                  0.0, 1.0, "–",
                                  note=(f"R={R:.1f} kN; H_max={bs_det['H_max_mm']:.0f} mm; "
                                        f"tq_req(bearing)≥{bs_det['tq_req_bearing_mm']:.1f} mm, "
@@ -2576,10 +2590,10 @@ class DCREngine:
                                        f"{bs_det['n_sides']} faces)"))
             else:
                 # Full verification — five separate checks
-                for key in ("Fcdw_wb_kN", "fcc_wb_MPa", "A_wb_mm2", "Fcdw_lc_kN", "fcd_y_MPa",
-                           "A_lc_mm2", "Fpsd_kN", "Aq_mm2", "tq_req_bearing_mm", "Fcd_kN",
-                           "fcd_bs_MPa", "KL_r_bs", "H_mm", "H_limit_bs_mm", "H_core_bs_mm",
-                           "H_max_mm", "tq_req_leg_mm"):
+                for key in ("Fcdw_wb_kN", "fcd_wb_MPa", "KL_r_wb", "A_wb_mm2", "Fcdw_lc_kN",
+                           "fcd_y_MPa", "A_lc_mm2", "Fpsd_kN", "f_bear_MPa", "Aq_mm2",
+                           "tq_req_bearing_mm", "Fcd_kN", "fcd_bs_MPa", "KL_r_bs", "H_mm",
+                           "H_limit_bs_mm", "H_core_bs_mm", "H_max_mm", "tq_req_leg_mm"):
                     if key not in bs_det:
                         raise KeyError(f"'{key}' missing from bearing_stiffener details.")
                 # Cl.509.7.1.2 — outstand: H ≤ 20·tq·ε
@@ -2591,24 +2605,33 @@ class DCREngine:
                 self._add_check(21, "Brg.Stiff: Leg ≤ H_limit", "Cl.509.7.1.2",
                                  bs_det["H_mm"], bs_det["H_limit_bs_mm"], "mm",
                                  note=_bs_leg_note)
-                # Cl.509.7.3.1 — web buckling (PASS = stiffener not needed; FAIL = stiffener needed)
-                self._add_check(21, "Brg.Stiff: Web Buckling", "Cl.509.7.3.1",
+                # Cl.509.7.3.1 — web check. Tells whether a load carrying stiffener is
+                # needed, not whether the stiffener passes, so it is reported as INFO.
+                _wb_needed = R > bs_det["Fcdw_wb_kN"]
+                self._add_check(21, "Brg.Stiff: Web Check (unstiffened web)", "Cl.509.7.3.1",
                                  R, bs_det["Fcdw_wb_kN"], "kN",
-                                 note=(f"fcc={bs_det['fcc_wb_MPa']:.2f} MPa, "
-                                       f"A=(b1+n1)·tw={bs_det['A_wb_mm2']:.0f} mm²"))
-                # Cl.509.7.3.2 — local crushing
-                self._add_check(21, "Brg.Stiff: Local Crushing", "Cl.509.7.3.2",
+                                 note=(f"{'stiffener required' if _wb_needed else 'stiffener not required'}; "
+                                       f"fcd={bs_det['fcd_wb_MPa']:.2f} MPa (curve c), "
+                                       f"KL/r={bs_det['KL_r_wb']:.1f}, "
+                                       f"A=(b1+n1)·tw={bs_det['A_wb_mm2']:.0f} mm²"),
+                                 info=True)
+                # Cl.509.7.4 — local capacity of the web at the flange; reported as INFO
+                # for the same reason (bearing stiffener needed when R exceeds it).
+                _lc_needed = R > bs_det["Fcdw_lc_kN"]
+                self._add_check(21, "Brg.Stiff: Web Local Capacity", "Cl.509.7.4",
                                  R, bs_det["Fcdw_lc_kN"], "kN",
-                                 note=(f"fcd={bs_det['fcd_y_MPa']:.2f} MPa, "
-                                       f"A=(b1+n2)·tw={bs_det['A_lc_mm2']:.0f} mm²"))
-                # Cl.509.7.3.3 — bearing contact
-                self._add_check(21, "Brg.Stiff: Bearing Contact", "Cl.509.7.3.3",
+                                 note=(f"{'stiffener required' if _lc_needed else 'stiffener not required'}; "
+                                       f"fy/γm0={bs_det['fcd_y_MPa']:.2f} MPa, "
+                                       f"A=(b1+n2)·tw={bs_det['A_lc_mm2']:.0f} mm²"),
+                                 info=True)
+                # Cl.509.7.5.2 — bearing check
+                self._add_check(21, "Brg.Stiff: Bearing Check", "Cl.509.7.5.2",
                                  R, bs_det["Fpsd_kN"], "kN",
-                                 note=(f"fyd={bs_det['fcd_y_MPa']:.2f} MPa, "
+                                 note=(f"fyq/(0.8·γm0)={bs_det['f_bear_MPa']:.2f} MPa, "
                                        f"Aq={bs_det['Aq_mm2']:.0f} mm², "
                                        f"tq_req≥{bs_det['tq_req_bearing_mm']:.1f} mm"))
-                # Cl.509.7.2.5 — stiffener column buckling
-                self._add_check(21, "Brg.Stiff: Column Buckling", "Cl.509.7.2.5",
+                # Cl.509.7.5.1 — buckling check of the stiffener (Fxd per Cl.509.7.1.5)
+                self._add_check(21, "Brg.Stiff: Buckling Check", "Cl.509.7.5.1",
                                  R, bs_det["Fcd_kN"], "kN",
                                  note=(f"fcd={bs_det['fcd_bs_MPa']:.2f} MPa, α=0.49, "
                                        f"KL/r={bs_det['KL_r_bs']:.2f}"))
