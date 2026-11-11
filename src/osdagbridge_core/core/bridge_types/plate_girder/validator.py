@@ -183,7 +183,7 @@ class BridgeInputValidator:
         if key == KEY_TS_GIRDER_SPACING:
             v = self._to_float(inputs.get(key))
             overall = self._to_float(inputs.get(KEY_TS_OVERALL_WIDTH))
-            max_gs = (overall / 2) if overall else None
+            max_gs = (overall) if overall else None
             if v is None: return 0.5, "Girder spacing must be a numeric value."
             if v < 0.5:   return 0.5, "Girder spacing is outside the practical range allowed in the software."
             if max_gs is not None and v > max_gs:
@@ -317,7 +317,7 @@ class BridgeInputValidator:
             v = self._to_float(inputs.get(key))
             if v is None: return 0.0, "Wearing course density must be a numeric value."
             if v < 0.0:   return 0.0, "Wearing course density is outside the practical range allowed in the software."
-            if v > 10.0:  return 10.0, "Wearing course density is outside the practical range allowed in the software."
+            if v > 28.0:  return 28.0, "Wearing course density is outside the practical range allowed in the software."
 
         elif key == KEY_WC_THICKNESS:
             v = self._to_float(inputs.get(key))
