@@ -16,6 +16,7 @@ from osdagbridge_core.core.utils.codes.keyfile import (
 )
 from osdagbridge_core.core.utils.common import (
     KEY_MODULE_PLATE_GIRDER, KEY_MODULE,
+    KEY_MATERIAL_GIRDER_FY,
     DEFAULT_GIRDER_SPACING,
     DEFAULT_RAILING_WIDTH,
     KEY_TS_GIRDER_SPACING, KEY_TS_NO_OF_GIRDERS, KEY_TS_DECK_OVERHANG, KEY_TS_OVERALL_WIDTH,
@@ -725,12 +726,13 @@ def _on_no_of_girders_changed(working_input_dict: dict) -> None:
     MP_STIFFENER_PROPS = [
         (KEY_MP_STIFFENER_NO_BEARING_STIFFENERS,  "bearing_stiffeners_each_end"),
         (KEY_MP_STIFFENER_SPACING,                "bearing_spacing_mm"),
-        (KEY_MP_STIFFENER_BEARING_THICKNESS,      "bearing_thickness_value"),
+        # Outstand before thickness — the thickness default is derived from the outstand
         (KEY_MP_STIFFENER_BEARING_OUTSTAND,       "bearing_outstand_mm"),
+        (KEY_MP_STIFFENER_BEARING_THICKNESS,      "bearing_thickness_value"),
         (KEY_MP_STIFFENER_INTERMEDIATE,           "intermediate_stiffener"),
         (KEY_MP_STIFFENER_INTERMEDIATE_SPACING,   "intermediate_spacing_mm"),
-        (KEY_MP_STIFFENER_INTERMEDIATE_THICKNESS, "intermediate_thickness_value"),
         (KEY_MP_STIFFENER_INTERMEDIATE_OUTSTAND,  "intermediate_outstand_mm"),
+        (KEY_MP_STIFFENER_INTERMEDIATE_THICKNESS, "intermediate_thickness_value"),
         (KEY_MP_STIFFENER_LONGITUDINAL,           "longitudinal_stiffener"),
         (KEY_MP_STIFFENER_LONGITUDINAL_THICKNESS, "longitudinal_thickness_value"),
         (KEY_MP_STIFFENER_DESIGN_METHOD,          "shear_buckling_method"),
@@ -760,6 +762,18 @@ def _on_no_of_girders_changed(working_input_dict: dict) -> None:
                         # Calculate default spacing: (1.5 * web_depth)
                         dw_val = float(working_input_dict.get(f"{KEY_MP_GIRDER_WEB_DEPTH}.G{girder_idx}.M{member_id}") or 0.0)
                         working_input_dict[key] = str(int(math.floor(dw_val * 1.5/5.0) * 5))
+                    elif base_key in (KEY_MP_STIFFENER_BEARING_THICKNESS, KEY_MP_STIFFENER_INTERMEDIATE_THICKNESS):
+                        # Default tq so the whole default outstand is effective: H ≤ 14·tq·ε
+                        # (IRC 24 Cl.509.7.1.2), rounded up to the next SAIL thickness.
+                        out_key = (KEY_MP_STIFFENER_BEARING_OUTSTAND
+                                   if base_key == KEY_MP_STIFFENER_BEARING_THICKNESS
+                                   else KEY_MP_STIFFENER_INTERMEDIATE_OUTSTAND)
+                        try:
+                            H_os = float(working_input_dict[f"{out_key}.G{girder_idx}.M{member_id}"])
+                            eps  = math.sqrt(250.0 / float(working_input_dict[KEY_MATERIAL_GIRDER_FY]))
+                            working_input_dict[key] = ceil_to_sail(H_os / (14.0 * eps))
+                        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+                            working_input_dict[key] = STIFFENER_DETAILS_DEFAULTS[defaults_key]
                     else:
                         working_input_dict[key] = STIFFENER_DETAILS_DEFAULTS[defaults_key]
                 
