@@ -1801,17 +1801,20 @@ class IRC22CapacityCalculator:
         else:
             Iys_prov = self._flat_stiffener_Iys(tq, H_core, tw, n_sides)
 
-        # Cl.509.7.2.5 — buckling check (core section)
+        # Cl.509.7.2.5 / 509.7.1.5 — buckling resistance Fqd of the stiffener (core section).
+        # Effective section: the stiffener plus a web strip of up to 20·tw on EACH side of
+        # the stiffener (along the girder), whatever the sidedness — limited to c/2 so
+        # adjacent stiffeners do not share web.
         h_w_strip = min(20.0 * tw, c / 2.0)
-        Aeff      = n_sides * H_core * tq + n_sides * h_w_strip * tw
         Astiff    = n_sides * H_core * tq
+        Aeff      = Astiff + 2.0 * h_w_strip * tw
 
         rys  = math.sqrt(Iys_prov / Aeff) if Aeff > 0 else 0.0
         KL   = 0.7 * d
         KL_r = KL / rys if rys > 0 else 1e9
 
         fcd    = IS800_2007.cl_7_1_2_1_design_compressisive_stress_plategirder(fy, gm0, KL_r, E)
-        Fqd_kN = fcd * Astiff / 1000.0
+        Fqd_kN = fcd * Aeff / 1000.0
         # Cl.509.7.2.5: Fq = V − Vcr/γm0. cfg.Vcr_kN is the post-critical resistance
         # Av·τb/γm0, so γm0 is already in it.
         Fq_kN  = max(V_kN - cfg.Vcr_kN, 0.0)
