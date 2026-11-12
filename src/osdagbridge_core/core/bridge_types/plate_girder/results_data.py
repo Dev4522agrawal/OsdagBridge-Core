@@ -1050,6 +1050,91 @@ def build_deflections_cache(config, result_data) -> dict:
 
     return cache
 
+
+def build_stiffener_connection_forces(result_data: dict) -> tuple:
+    """Forces the transverse grillage members put into each girder node, for the
+    IRC 24 Cl.509.7.2.5 combined stiffener check.
+
+    Every grillage member that joins nodes of two different girders is treated as a
+    cross-bracing (interior node) or end diaphragm (girder end node) connection, and the
+    stiffener at that node as its connection stiffener. Members to edge beams (deck
+    overhang) are not between girders and are skipped. Forces are global (Y vertical,
+    Z transverse); for a transverse member Vy is the vertical shear, Mx the bending in
+    the cross-section plane and Vz the horizontal (axial) force.
+
+    Per girder node and load case the member end forces framing into the node are
+    summed (net load on the stiffener): Fx = |ΣVy|, Mx = ΣMx, Vz = ΣVz. V is the largest
+    |Vy| of the girder elements meeting at the node (girder shear at the stiffener).
+
+    Returns (per_girder, uls_lcs):
+        per_girder = {g_name: {"int": {lc: [point, ...]}, "brg": {lc: [point, ...]}}}
+        uls_lcs    = ULS combination load-case names (the envelope run's scope)
+    """
+    def _num(v):
+        return 0.0 if v is None or v != v else float(v)
+
+    girders = result_data.get("girders") or {}
+    members = {str(k): (str(v[0]), str(v[1]))
+               for k, v in (result_data.get("members") or {}).items()}
+
+    node_girder: dict[str, str] = {}
+    girder_ends_at_node: dict[str, list] = {}     # node → [(element, "i"/"j"), ...]
+    end_nodes: set = set()
+    for g_name, g in girders.items():
+        degree: dict[str, int] = {}
+        for m in g.get("members", []):
+            m = str(m)
+            if m not in members:
+                continue
+            for n, end in zip(members[m], ("i", "j")):
+                node_girder[n] = g_name
+                girder_ends_at_node.setdefault(n, []).append((m, end))
+                degree[n] = degree.get(n, 0) + 1
+        # A girder end node belongs to only one girder element
+        end_nodes.update(n for n, k in degree.items() if k == 1)
+
+    conn_ends_at_node: dict[str, list] = {}
+    for m, (n1, n2) in members.items():
+        g1, g2 = node_girder.get(n1), node_girder.get(n2)
+        if g1 is None or g2 is None or g1 == g2:
+            continue
+        conn_ends_at_node.setdefault(n1, []).append((m, "i"))
+        conn_ends_at_node.setdefault(n2, []).append((m, "j"))
+
+    lc_groups = classify_loadcases(result_data.get("loadcases", []))
+    uls_lcs = tuple(str(lc) for key in ("uls_basic", "uls_seismic", "uls_accidental")
+                    for lc in lc_groups.get(key, []))
+
+    forces = result_data.get("forces") or {}
+    out = {g: {"int": {}, "brg": {}} for g in girders}
+    for lc in result_data.get("loadcases", []):
+        lc_str = str(lc)
+        if lc_str.startswith("Envelope"):          # pseudo cases, copies of a combination
+            continue
+        f_lc = forces.get(lc_str) or {}
+        if not f_lc:
+            continue
+        for n, ends in conn_ends_at_node.items():
+            rows = [(f_lc[m], end) for m, end in ends if m in f_lc]
+            if not rows:
+                continue
+            Fy = sum(_num(r.get(f"Vy_{end}")) for r, end in rows)
+            Fz = sum(_num(r.get(f"Vz_{end}")) for r, end in rows)
+            Mx = sum(_num(r.get(f"Mx_{end}")) for r, end in rows)
+            V  = max((abs(_num(f_lc[m].get(f"Vy_{end}")))
+                      for m, end in girder_ends_at_node.get(n, []) if m in f_lc),
+                     default=0.0)
+            kind = "brg" if n in end_nodes else "int"
+            out[node_girder[n]][kind].setdefault(lc_str, []).append({
+                "node":   n,
+                "Fx_kN":  abs(Fy) / 1e3,     # N → kN
+                "Mx_kNm": Mx / 1e3,          # N·m → kN·m
+                "Vz_kN":  Fz / 1e3,
+                "V_kN":   V / 1e3,
+            })
+    return out, uls_lcs
+
+
 def build_forces_summary(result_handler, load_effects_cache: dict) -> dict:
     """
     Build Chapter 4 Table 4.1 data by reusing load_effects_cache for Mz/Vy

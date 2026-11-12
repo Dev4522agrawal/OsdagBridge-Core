@@ -13,6 +13,7 @@ from typing import Dict, List, Optional, Any
 
 from osdagbridge_core.core.bridge_types.plate_girder.results_data import (
     build_deflections_cache,
+    build_stiffener_connection_forces,
     classify_loadcases,
     composite_stiffness_props,
 )
@@ -321,7 +322,6 @@ class StiffenerConfig:
     H_mm: float = 0.0           # outstanding leg height (mm)
     n_sides: int = 2             # 1 = one-sided, 2 = two-sided
     Iys_mm4: float = 0.0        # provided MI (mm⁴); 0 = auto-compute from flat-plate formula
-    V_kN: float = 0.0           # design shear at stiffener location (kN)
     Vcr_kN: float = 0.0         # critical shear resistance at that location (kN)
     # Required (keyword-only, no default): wired from KEY_MP_STIFFENER_DESIGN_METHOD via
     # _req() in from_plate_girder_bridge(). "post_critical" | "tension_field". Manual/guidance
@@ -338,6 +338,14 @@ class StiffenerConfig:
     bs_R_kN: float = 0.0        # design reaction / concentrated load (kN)
     bs_b1_mm: float = 0.0       # stiff bearing length on flange (0 = auto via IS 800 Cl.8.7.1.3)
     bs_Iys_mm4: float = 0.0     # provided MI (mm⁴) for bearing stiffener; 0 = auto-compute
+
+    # ── Connection forces for the Cl.509.7.2.5 combined check ─────────────────────────
+    # Filled by run_design_check from the grillage transverse members framing into this
+    # girder: {"int": {lc: [point, ...]}, "brg": {lc: [point, ...]}}, where a point is
+    # {"node", "Fx_kN", "Mx_kNm", "Vz_kN", "V_kN"} at one girder node ("int" = interior
+    # node → intermediate stiffener, "brg" = girder end node → bearing stiffener).
+    conn_forces: dict = field(default_factory=dict)
+    conn_uls_lcs: tuple = ()    # load cases the envelope run takes the worst of
 
 
 @dataclass
@@ -1638,11 +1646,93 @@ class IRC22CapacityCalculator:
             return tq * H**3 / 3.0
         return 2.0 * (tq * H**3 / 12.0 + tq * H * (tw / 2.0 + H / 2.0)**2)
 
-    def compute_intermediate_stiffener(self) -> dict:
+    def _stiffener_combined_check(self, kind: str, Fqd_kN: float, Fxd_kN: float,
+                                  Myq_kNm: float, e_mm: float,
+                                  Fx_includes_V: bool,
+                                  lc_name: Optional[str] = None) -> Optional[dict]:
+        """IRC 24 Cl.509.7.2.5 — stiffener carrying external loads in addition to the
+        tension-field / buckling force Fq:
+
+            (Fq − Fx)/Fqd + Fx/Fxd + Mq/Myq ≤ 1      (Fq − Fx taken as 0 when Fq < Fx)
+
+        kind "int" = intermediate stiffeners, "brg" = bearing stiffeners (Cl.509.7.5.1:
+        a load carrying stiffener also acting as an intermediate stiffener).
+
+        Every interior transverse grillage member is taken as a possible cross-bracing
+        location (end transverse members = end diaphragms): the stiffener there is
+        assumed to also act as the connection stiffener for the bracing. Per girder node:
+          Fx = |ΣVy| of the transverse members framing in (+ girder end shear V for a
+               bearing stiffener, so Fx is the support reaction plus the diaphragm load)
+          Mq = Fx·e + |ΣMx| + |ΣVz|·d/4
+               e = eccentricity of Fx from the stiffener centroid; the reaction and the
+               bracing loads act on the web centreline, so e = 0 for two-sided stiffeners.
+               Upper bound, stiffener simply supported between the flanges: a couple Mx
+               produces at most Mx, and a horizontal force Vz at height a produces
+               Vz·a(d−a)/d ≤ Vz·d/4.
+          Fq = V − Vcr (Vcr already carries γm0), V = girder shear at that node.
+
+        lc_name given (per-load-case run) → only that load case; otherwise the worst
+        over the ULS combinations. Returns the governing point, or None when no
+        connection forces are available.
+        """
+        cfg = self.cfg.stiffener
+        pts_by_lc = (cfg.conn_forces or {}).get(kind, {}) if cfg else {}
+        if not pts_by_lc:
+            return None
+        if lc_name:
+            lcs = [lc_name] if lc_name in pts_by_lc else []
+        else:
+            lcs = [lc for lc in cfg.conn_uls_lcs if lc in pts_by_lc] or list(pts_by_lc)
+        if not lcs:
+            return None
+
+        d = self.sec.dw
+        worst = None
+        for lc in lcs:
+            for p in pts_by_lc[lc]:
+                V  = p["V_kN"]
+                Fx = p["Fx_kN"] + (V if Fx_includes_V else 0.0)
+                Fq = max(V - cfg.Vcr_kN, 0.0)
+                Mq = Fx * e_mm / 1e3 + abs(p["Mx_kNm"]) + abs(p["Vz_kN"]) * d / 4.0 / 1e3
+                t_q = max(Fq - Fx, 0.0) / Fqd_kN if Fqd_kN > 0 else 0.0
+                t_x = Fx / Fxd_kN if Fxd_kN > 0 else 0.0
+                t_m = Mq / Myq_kNm if Myq_kNm > 0 else 0.0
+                ratio = t_q + t_x + t_m
+                if worst is None or ratio > worst["ratio"]:
+                    worst = {
+                        "ratio": round(ratio, 4), "lc": lc, "node": p.get("node"),
+                        "Fq_kN": round(Fq, 3), "Fx_kN": round(Fx, 3), "Mq_kNm": round(Mq, 3),
+                        "Fqd_kN": round(Fqd_kN, 3), "Fxd_kN": round(Fxd_kN, 3),
+                        "Myq_kNm": round(Myq_kNm, 3), "e_mm": round(e_mm, 3),
+                    }
+        return worst
+
+    @staticmethod
+    def _stiffener_Myq_and_e(fy: float, gm0: float, Iys: float, H_core: float, tw: float,
+                             n_sides: int, A_stiff: float, A_eff: float) -> tuple:
+        """Cl.509.7.2.5 section properties of a flat stiffener (core section).
+
+        Myq = fyq·Ze/γm0 (kN·m): yield moment about the centroidal axis parallel to the
+              web. Extreme fibre at the outstand tip: tw/2 + H_core from the web
+              centreline (two-sided), H_core from the web face (one-sided, where Iys is
+              about the web face).
+        e   = eccentricity (mm) of a load on the web centreline from the centroid of the
+              effective section: 0 for two-sided stiffeners (symmetric about the web).
+        """
+        y_max = (tw / 2.0 + H_core) if n_sides == 2 else H_core
+        Myq_kNm = (fy * Iys / y_max / gm0 / 1e6) if y_max > 0 else 0.0
+        e_mm = (0.0 if n_sides == 2 or A_eff <= 0
+                else A_stiff * (tw / 2.0 + H_core / 2.0) / A_eff)
+        return Myq_kNm, e_mm
+
+    def compute_intermediate_stiffener(self, V_kN: float = 0.0,
+                                       lc_name: Optional[str] = None) -> dict:
         """Intermediate transverse stiffener checks per IRC 24-2010 Cl.509.7.2 / IS 800 Cl.8.7.2.
 
         Always computes geometry-based required dimensions (H_max, tq_req, c_req).
         Runs verification checks only when c_mm / tq_mm / H_mm are all provided.
+        V_kN = design shear of the girder (Fq = V − Vcr); lc_name = load case of a
+        per-load-case run (None = envelope).
         """
         sec, mat = self.sec, self.mat
         d    = sec.dw
@@ -1722,8 +1812,16 @@ class IRC22CapacityCalculator:
 
         fcd    = IS800_2007.cl_7_1_2_1_design_compressisive_stress_plategirder(fy, gm0, KL_r, E)
         Fqd_kN = fcd * Astiff / 1000.0
-        # IS 800 Cl.8.7.2.5: Fq = V − Vcr (no γm0 on demand side; γm0 is already in fcd/Fqd).
-        Fq_kN  = max(cfg.V_kN - cfg.Vcr_kN, 0.0)
+        # Cl.509.7.2.5: Fq = V − Vcr/γm0. cfg.Vcr_kN is the post-critical resistance
+        # Av·τb/γm0, so γm0 is already in it.
+        Fq_kN  = max(V_kN - cfg.Vcr_kN, 0.0)
+
+        # Cl.509.7.2.5 — combined check with the bracing connection forces.
+        # Fxd = buckling resistance of the same stiffener section (Cl.509.7.1.5).
+        Myq_kNm, e_is = self._stiffener_Myq_and_e(fy, gm0, Iys_prov, H_core, tw,
+                                                  n_sides, Astiff, Aeff)
+        comb_is = self._stiffener_combined_check("int", Fqd_kN, Fqd_kN, Myq_kNm, e_is,
+                                                 Fx_includes_V=False, lc_name=lc_name)
 
         return {
             "design_guidance"    : False,
@@ -1747,9 +1845,11 @@ class IRC22CapacityCalculator:
             "fcd_MPa"            : round(fcd, 3),
             "Fqd_kN"             : round(Fqd_kN, 3),
             "Fq_kN"              : round(Fq_kN, 3),
+            "Myq_kNm"            : round(Myq_kNm, 3),
+            "combined"           : comb_is,
         }
 
-    def compute_bearing_stiffener(self) -> dict:
+    def compute_bearing_stiffener(self, lc_name: Optional[str] = None) -> dict:
         """Bearing stiffener checks per IRC 24-2010 Cl.509.7.3 / IS 800 Cl.8.7.3.
 
         Requires bs_R_kN > 0 (reaction known).
@@ -1863,6 +1963,14 @@ class IRC22CapacityCalculator:
         fcd_bs = IS800_2007.cl_7_1_2_1_design_compressisive_stress_plategirder(fy, gm0, KL_r_bs, E)
         Fcd_kN = fcd_bs * Aeff_bs / 1000.0
 
+        # Cl.509.7.5.1 → Cl.509.7.2.5 — the bearing stiffener also acts as an intermediate
+        # stiffener and as the connection stiffener of the end diaphragm. Myq = fyq·Ze/γm0
+        # on the core section; Fqd = Fxd = buckling resistance of this stiffener (Fcd).
+        Myq_bs_kNm, e_bs = self._stiffener_Myq_and_e(fy, gm0, Iys, H_core_bs, tw, n_sides,
+                                                     n_total * H_core_bs * tq, Aeff_bs)
+        comb_bs = self._stiffener_combined_check("brg", Fcd_kN, Fcd_kN, Myq_bs_kNm, e_bs,
+                                                 Fx_includes_V=True, lc_name=lc_name)
+
         return {
             "design_guidance"   : False,
             "H_max_mm"          : round(H_max, 1),
@@ -1896,6 +2004,8 @@ class IRC22CapacityCalculator:
             "H_core_bs_mm"      : round(H_core_bs, 3),
             "Fcd_kN"            : round(Fcd_kN, 3),
             "R_kN"              : R,
+            "Myq_kNm"           : round(Myq_bs_kNm, 3),
+            "combined"          : comb_bs,
         }
 
     # Orchestrator — runs every IRC 22:2015 clause computation into one CapacityResults.
@@ -1907,6 +2017,7 @@ class IRC22CapacityCalculator:
         V_sls_kN: float = 0.0,
         Vr_kN: float = 0.0,              # Cl.606.4.2 — LL shear range for fatigue stud spacing
         provided_stud_spacing_mm: float = None,
+        lc_name: Optional[str] = None,   # per-load-case run → stiffener combined checks use only this LC
     ) -> CapacityResults:
         results = CapacityResults()
         results.source = "IRC22_2014"
@@ -2128,7 +2239,8 @@ class IRC22CapacityCalculator:
         # 18. Intermediate stiffener checks (IRC 24-2010 Cl.509.7.2 / IS 800 Cl.8.7.2).
         # Opt-in by setting cfg.stiffener to any StiffenerConfig. Runs guidance when c/tq/H not given.
         if self.cfg.stiffener is not None:
-            is_res = self.compute_intermediate_stiffener()
+            # Vu_kN = design shear for the stiffener force Fq = V − Vcr (Cl.509.7.2.5)
+            is_res = self.compute_intermediate_stiffener(V_kN=Vu_kN, lc_name=lc_name)
             results.details["intermediate_stiffener"] = is_res
             if not is_res.get("skipped") and not is_res.get("design_guidance"):
                 results.is_H_limit_mm   = is_res["H_limit_mm"]
@@ -2140,7 +2252,7 @@ class IRC22CapacityCalculator:
         # 19. Bearing stiffener checks (IRC 24-2010 Cl.509.7.3 / IS 800 Cl.8.7.3).
         # Requires bs_R_kN > 0. Runs guidance when tq/H not given.
         if self.cfg.stiffener is not None and self.cfg.stiffener.bs_R_kN > 0:
-            bs_res = self.compute_bearing_stiffener()
+            bs_res = self.compute_bearing_stiffener(lc_name=lc_name)
             results.details["bearing_stiffener"] = bs_res
             if not bs_res.get("skipped") and not bs_res.get("design_guidance"):
                 results.bs_Fcdw_wb_kN = bs_res["Fcdw_wb_kN"]
@@ -2567,6 +2679,12 @@ class DCREngine:
                                      is_det["Fq_kN"], is_det["Fqd_kN"], "kN",
                                      note=(f"fcd={is_det['fcd_MPa']:.2f} MPa, α=0.49, "
                                            f"KL/r={is_det['KL_r']:.2f}"))
+                # Cl.509.7.2.5 — combined check with the bracing connection forces
+                _cmb = is_det.get("combined")
+                if _cmb:
+                    self._add_check(20, "Int.Stiff: Combined Check", "Cl.509.7.2.5",
+                                     _cmb["ratio"], 1.0, "–",
+                                     note=self._combined_note(_cmb))
 
         # Bearing stiffener
         bs_det = c.details.get("bearing_stiffener", {"skipped": True})
@@ -2635,8 +2753,23 @@ class DCREngine:
                                  R, bs_det["Fcd_kN"], "kN",
                                  note=(f"fcd={bs_det['fcd_bs_MPa']:.2f} MPa, α=0.49, "
                                        f"KL/r={bs_det['KL_r_bs']:.2f}"))
+                # Cl.509.7.5.1 / 509.7.2.5 — combined check with the end diaphragm forces
+                _cmb = bs_det.get("combined")
+                if _cmb:
+                    self._add_check(21, "Brg.Stiff: Combined Check", "Cl.509.7.5.1 / 509.7.2.5",
+                                     _cmb["ratio"], 1.0, "–",
+                                     note=self._combined_note(_cmb))
 
         return self.checks
+
+    @staticmethod
+    def _combined_note(cmb: dict) -> str:
+        """Note text for a Cl.509.7.2.5 combined-check row."""
+        return (f"(Fq−Fx)/Fqd + Fx/Fxd + Mq/Myq; Fq={cmb['Fq_kN']:.1f}, "
+                f"Fx={cmb['Fx_kN']:.1f}, Fqd=Fxd={cmb['Fxd_kN']:.1f} kN; "
+                f"Mq={cmb['Mq_kNm']:.2f}, Myq={cmb['Myq_kNm']:.2f} kNm; "
+                f"Mq = Fx·e + |Mx| + |Vz|·d/4 (upper bound, e={cmb['e_mm']:.0f} mm); "
+                f"LC {cmb['lc']}, node {cmb['node']}")
 
     def _structural_checks(self) -> List[CheckResult]:
         """Checks belonging to the 8 design categories only (excludes stiffener check_ids 20/21)."""
@@ -3347,6 +3480,7 @@ def _compute_per_lc_dcr(
             M_sls_kNm=lc_d.M_sls_kNm,
             V_sls_kN=lc_d.V_sls_kN,
             Vr_kN=lc_d.Vr_kN,
+            lc_name=str(lc_name),
         )
         lc_engine = DCREngine(lc_d, lc_cap)
         lc_engine.run_all_checks()
@@ -3554,6 +3688,7 @@ def run_design_check(
     # that girder's actual geometry. Without a bridge (config supplied directly by the
     # caller) there is no per-girder data to draw from, so every girder shares `config`.
     per_girder_configs: Dict[str, "BridgeConfig"] = {}
+    conn_forces, conn_uls_lcs = build_stiffener_connection_forces(result_data)
 
     for idx, (g_name, g_demand) in enumerate(per_girder_demands.items()):
         if plate_girder_bridge is not None:
@@ -3568,6 +3703,9 @@ def run_design_check(
                 g_config = config
         else:
             g_config = config
+        # Connection forces for the Cl.509.7.2.5 combined stiffener checks
+        g_config.stiffener.conn_forces  = conn_forces.get(g_name, {})
+        g_config.stiffener.conn_uls_lcs = conn_uls_lcs
         per_girder_configs[g_name] = g_config
 
         g_cap = IRC22CapacityCalculator(g_config).compute_all(
