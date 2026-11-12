@@ -335,6 +335,10 @@ class StiffenerConfig:
     bs_H_mm: float = 0.0        # outstanding leg height (mm)
     bs_n_plates: int = 2        # bearing stiffener plates per face of web, at each support
     bs_n_sides: int = 2         # 1 = one-sided, 2 = two-sided (plates on both faces of web)
+    bs_spacing_mm: float = 0.0  # c/c spacing of bearing stiffener plates along the girder (mm)
+    # Distance from the outermost bearing stiffener to the girder end (mm). No input yet:
+    # the stiffener is taken at the girder end (as drawn in CAD), so no web on the outer side.
+    bs_end_dist_mm: float = 0.0
     bs_R_kN: float = 0.0        # design reaction / concentrated load (kN)
     bs_b1_mm: float = 0.0       # stiff bearing length on flange (0 = auto via IS 800 Cl.8.7.1.3)
     bs_Iys_mm4: float = 0.0     # provided MI (mm⁴) for bearing stiffener; 0 = auto-compute
@@ -663,6 +667,7 @@ class BridgeConfig:
             bs_tq_mm    = _optfloat(KEY_MP_STIFFENER_BEARING_THICKNESS),
             bs_H_mm     = _optfloat(KEY_MP_STIFFENER_BEARING_OUTSTAND),
             bs_n_plates = int(_optfloat(KEY_MP_STIFFENER_NO_BEARING_STIFFENERS, 2)),
+            bs_spacing_mm = _optfloat(KEY_MP_STIFFENER_SPACING),
             # User count is per face of web; bearing stiffeners are taken as two-sided.
             bs_n_sides  = 2,
             bs_R_kN     = 0.0,
@@ -1957,9 +1962,17 @@ class IRC22CapacityCalculator:
         # Minimum tq required for the bearing check to pass
         tq_req_bearing = (R * 1000.0 / (f_bear * n_total * H) if H > 0 and f_bear > 0 else 0.0)
 
-        # Cl.509.7.5.1 / 509.7.1.5 — buckling check of the stiffener: Fx ≤ Fxd
+        # Cl.509.7.5.1 / 509.7.1.5 — buckling check of the stiffener: Fx ≤ Fxd.
+        # Effective section: the plates plus web of up to 20·tw on each side of each plate,
+        # where available. Web length along the girder:
+        #   outer side (toward girder end) : min(20·tw, end distance)
+        #   between adjacent plates        : (n_plates − 1) · min(spacing, 40·tw)
+        #   inner side (toward the span)   : 20·tw
         h_w_strip = 20.0 * tw
-        Aeff_bs   = n_total * H_core_bs * tq + 2 * h_w_strip * tw
+        L_web_out = min(h_w_strip, max(cfg.bs_end_dist_mm, 0.0))
+        L_web_mid = (n_plates - 1) * min(max(cfg.bs_spacing_mm, 0.0), 2.0 * h_w_strip)
+        L_web_bs  = L_web_out + L_web_mid + h_w_strip
+        Aeff_bs   = n_total * H_core_bs * tq + L_web_bs * tw
         rys_bs    = math.sqrt(Iys / Aeff_bs) if Aeff_bs > 0 else 0.0
         KL_r_bs   = KL / rys_bs if rys_bs > 0 else 1e9
 
@@ -1998,6 +2011,7 @@ class IRC22CapacityCalculator:
             "f_bear_MPa"        : round(f_bear, 3),
             "Fpsd_kN"           : round(Fpsd_kN, 3),
             "h_w_strip_mm"      : round(h_w_strip, 3),
+            "L_web_bs_mm"       : round(L_web_bs, 3),
             "Aeff_bs_mm2"       : round(Aeff_bs, 3),
             "rys_bs_mm"         : round(rys_bs, 3),
             "KL_r_bs"           : round(KL_r_bs, 3),
@@ -2755,7 +2769,8 @@ class DCREngine:
                 self._add_check(21, "Brg.Stiff: Buckling Check", "Cl.509.7.5.1",
                                  R, bs_det["Fcd_kN"], "kN",
                                  note=(f"fcd={bs_det['fcd_bs_MPa']:.2f} MPa, α=0.49, "
-                                       f"KL/r={bs_det['KL_r_bs']:.2f}"))
+                                       f"KL/r={bs_det['KL_r_bs']:.2f}, "
+                                       f"web strip={bs_det['L_web_bs_mm']:.0f} mm"))
                 # Cl.509.7.5.1 / 509.7.2.5 — combined check with the end diaphragm forces
                 _cmb = bs_det.get("combined")
                 if _cmb:
